@@ -13,10 +13,12 @@ import {
   GripVertical,
   History,
   LoaderCircle,
+  Moon,
   Plus,
   Save,
   Search,
   Settings,
+  Sun,
   Trash2,
   Upload,
   Users,
@@ -173,6 +175,8 @@ type CalendarSearchResult = {
   sheetLabel: string;
 };
 
+type ThemeMode = "light" | "dark";
+
 type DragContext = {
   sheetLabel: string;
   blockIndex: number;
@@ -207,6 +211,17 @@ function formatTimeInput(value: string) {
   const minute = Math.min(Number.parseInt(match[2] || "0", 10), 59);
 
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function getInitialThemeMode(): ThemeMode {
+  if (typeof window === "undefined") return "light";
+
+  const storedTheme = window.localStorage.getItem("appmonroy-theme");
+  if (storedTheme === "dark" || storedTheme === "light") {
+    return storedTheme;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function parseLocalDate(value: string) {
@@ -647,6 +662,7 @@ function getCalendarSearchSuggestions(sheets: SheetPlan[], query: string) {
 }
 
 function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialThemeMode());
   const [periods, setPeriods] = useState<SavedPeriod[]>([]);
   const [activePeriod, setActivePeriod] = useState<SavedPeriod | null>(null);
   const [periodName, setPeriodName] = useState("Periodo 2");
@@ -715,6 +731,11 @@ function App() {
     loadGeneralConfig();
     loadTeacherDirectory();
   }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", themeMode === "dark");
+    window.localStorage.setItem("appmonroy-theme", themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     if (!draggedRow) return;
@@ -1398,7 +1419,7 @@ function App() {
       draggedRow?.sheetLabel === sheetLabel && draggedRow.blockIndex === blockIndex;
 
     if (isDragged) {
-      return "bg-[#fff8e5] opacity-45 shadow-sm scale-[0.995]";
+      return "bg-accent/20 opacity-45 shadow-sm scale-[0.995]";
     }
 
     if (!isSameTable || !dropTarget || dropTarget.rowIndex === draggedRow.rowIndex) {
@@ -1406,7 +1427,7 @@ function App() {
     }
 
     if (rowIndex === dropTarget.rowIndex) {
-      return "bg-[#eef4fb] ring-1 ring-primary/20";
+      return "bg-muted ring-1 ring-primary/20";
     }
 
     if (draggedRow.rowIndex < dropTarget.rowIndex) {
@@ -1457,6 +1478,10 @@ function App() {
     );
   }
 
+  function toggleThemeMode() {
+    setThemeMode((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
+  }
+
   const draggedPreviewBlock = draggedRow
     ? generatedSheets.find((sheet) => sheet.label === draggedRow.sheetLabel)?.blocks[
         draggedRow.blockIndex
@@ -1477,7 +1502,7 @@ function App() {
   );
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#d9e6f7,transparent_32%),radial-gradient(circle_at_top_right,#f6e2a4,transparent_26%),linear-gradient(180deg,#f7f9fd_0%,#edf3fb_100%)]">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#d9e6f7,transparent_32%),radial-gradient(circle_at_top_right,#f6e2a4,transparent_26%),linear-gradient(180deg,#f7f9fd_0%,#edf3fb_100%)] text-foreground dark:bg-[radial-gradient(circle_at_top_left,rgba(59,89,133,0.42),transparent_32%),radial-gradient(circle_at_top_right,rgba(240,199,90,0.18),transparent_26%),linear-gradient(180deg,#0f1724_0%,#131d2c_100%)]">
       <div className="mx-auto flex min-h-screen w-full max-w-[1440px] flex-col gap-5 px-5 py-5">
         <header className="flex flex-col gap-4 border-b border-border/80 pb-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -1488,19 +1513,35 @@ function App() {
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
             <Button
               variant="outline"
+              role="switch"
+              aria-checked={themeMode === "dark"}
+              aria-label="Cambiar tema oscuro"
+              onClick={toggleThemeMode}
+              className="h-8 gap-2 px-2"
+            >
+              {themeMode === "dark" ? <Sun /> : <Moon />}
+              <span
+                aria-hidden="true"
+                className={`relative h-5 w-9 rounded-full border transition-colors ${
+                  themeMode === "dark"
+                    ? "border-primary bg-primary"
+                    : "border-input bg-muted"
+                }`}
+              >
+                <span
+                  className={`absolute top-1/2 size-3.5 -translate-y-1/2 rounded-full bg-card shadow-sm transition-[left] ${
+                    themeMode === "dark" ? "left-[18px]" : "left-[3px]"
+                  }`}
+                />
+              </span>
+            </Button>
+            <Button
+              variant="outline"
               size="icon"
               aria-label="Config general"
               onClick={openGeneralConfig}
             >
               <Settings />
-            </Button>
-            <Button
-              variant="outline"
-              aria-label="Directorio de maestros"
-              onClick={openTeacherDirectory}
-            >
-              <Users />
-              Directorio de maestros
             </Button>
             <Button variant="outline" onClick={startOverSession}>
               <Plus />
@@ -1581,7 +1622,7 @@ function App() {
                                   <button
                                     key={`${suggestion.kind}-${suggestion.value}`}
                                     type="button"
-                                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors hover:bg-[#eef4fb] hover:text-primary"
+                                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted hover:text-primary"
                                     onClick={() => {
                                       setCalendarSearchSelection({
                                         kind: suggestion.kind,
@@ -1626,13 +1667,13 @@ function App() {
                     onValueChange={setSelectedSheet}
                     className="flex min-w-0 flex-col gap-0"
                   >
-                      <div className="mb-4 overflow-x-auto rounded-lg border border-border bg-[#eef4fb] p-1.5">
+                      <div className="mb-4 overflow-x-auto rounded-lg border border-border bg-muted p-1.5">
                         <TabsList className="h-10 min-w-max justify-start gap-1.5 bg-transparent p-0">
                           {generatedSheets.map((sheet) => (
                             <TabsTrigger
                               key={sheet.label}
                               value={sheet.label}
-                              className="relative h-8 flex-none border border-transparent bg-white/70 px-3 text-xs font-semibold text-muted-foreground shadow-none transition-all hover:border-primary/30 hover:bg-white hover:text-primary data-[state=active]:border-primary data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md data-[state=active]:ring-2 data-[state=active]:ring-accent/45 data-[state=active]:after:absolute data-[state=active]:after:inset-x-3 data-[state=active]:after:-bottom-1.5 data-[state=active]:after:h-0.5 data-[state=active]:after:rounded-full data-[state=active]:after:bg-accent data-active:border-primary data-active:bg-primary data-active:text-primary-foreground data-active:shadow-md"
+                              className="relative h-8 flex-none border border-transparent bg-card/80 px-3 text-xs font-semibold text-muted-foreground shadow-none transition-all hover:border-primary/30 hover:bg-card hover:text-primary data-[state=active]:border-primary data-[state=active]:bg-primary data-[state=active]:!text-primary-foreground data-[state=active]:shadow-md data-[state=active]:ring-2 data-[state=active]:ring-accent/45 data-[state=active]:after:absolute data-[state=active]:after:inset-x-3 data-[state=active]:after:-bottom-1.5 data-[state=active]:after:h-0.5 data-[state=active]:after:rounded-full data-[state=active]:after:bg-accent data-active:border-primary data-active:bg-primary data-active:!text-primary-foreground data-active:shadow-md dark:data-[state=active]:!text-primary-foreground dark:data-active:!text-primary-foreground"
                             >
                               {sheet.label}
                             </TabsTrigger>
@@ -1646,7 +1687,7 @@ function App() {
                           value={sheet.label}
                           className="m-0 w-full space-y-4"
                         >
-                          <div className="flex flex-col gap-3 rounded-lg border border-border bg-[#f8fbff] p-3 md:flex-row md:items-center md:justify-between">
+                          <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/45 p-3 md:flex-row md:items-center md:justify-between">
                             <div>
                               <div className="text-sm font-semibold text-primary">
                                 Hoja: {sheet.label}
@@ -1687,7 +1728,7 @@ function App() {
                                 key={`${sheet.label}-${block.day}-${block.turn}`}
                                 className="overflow-hidden rounded-lg border border-border bg-card"
                               >
-                                <div className="border-b border-border/70 bg-[#f8fbff] p-3">
+                                <div className="border-b border-border/70 bg-muted/45 p-3">
                                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                                     <div>
                                       <h3 className="text-base font-semibold text-foreground">
@@ -1709,7 +1750,7 @@ function App() {
                                       </div>
                                       <Badge
                                         variant="outline"
-                                        className="border-accent/70 bg-[#fff6d8] text-[#6f4d00]"
+                                        className="border-accent/70 bg-accent/20 text-accent-foreground dark:bg-accent/25"
                                       >
                                         {block.turn}
                                       </Badge>
@@ -1719,8 +1760,8 @@ function App() {
                                 <div className="p-3">
                                   <div className="overflow-hidden rounded-lg border border-border">
                                     <Table>
-                                      <TableHeader className="bg-[#eef4fb]">
-                                        <TableRow className="hover:bg-[#eef4fb]">
+                                      <TableHeader className="bg-muted">
+                                        <TableRow className="hover:bg-muted">
                                           <TableHead className="w-56 px-3 text-primary">
                                             Rango de hora
                                           </TableHead>
@@ -1746,7 +1787,7 @@ function App() {
                                           <TableRow
                                             key={`${block.day}-${block.turn}-${row.subject}-${rowIndex}`}
                                             data-row-index={rowIndex}
-                                            className={`transition-[background-color,box-shadow,opacity,transform] duration-150 ease-out will-change-transform hover:bg-[#fff8e5]/55 ${getRowDragClass(
+                                            className={`transition-[background-color,box-shadow,opacity,transform] duration-150 ease-out will-change-transform hover:bg-accent/15 ${getRowDragClass(
                                               sheet.label,
                                               blockIndex,
                                               rowIndex,
@@ -1850,7 +1891,7 @@ function App() {
                                             <TableCell className="px-3 py-2">
                                               <button
                                                 type="button"
-                                                className="mx-auto flex size-8 cursor-grab touch-none select-none items-center justify-center rounded-md border border-input bg-card text-primary transition-colors hover:bg-[#eef4fb] active:cursor-grabbing"
+                                                className="mx-auto flex size-8 cursor-grab touch-none select-none items-center justify-center rounded-md border border-input bg-card text-primary transition-colors hover:bg-muted active:cursor-grabbing"
                                                 aria-label="Arrastrar fila"
                                                 onPointerDown={(event) =>
                                                   handleRowPointerDown(
@@ -1939,6 +1980,18 @@ function App() {
                 </CardContent>
               </Card>
             ) : null}
+
+            <Button
+              variant="outline"
+              className="h-11 justify-start"
+              onClick={openTeacherDirectory}
+            >
+              <Users />
+              Directorio de maestros
+              <Badge variant="secondary" className="ml-auto">
+                {teacherDirectory.length}
+              </Badge>
+            </Button>
 
             <Button
               variant="outline"
@@ -2106,8 +2159,8 @@ function App() {
               <div className="p-5">
                 <div className="overflow-hidden rounded-lg border border-border">
                   <Table>
-                    <TableHeader className="bg-[#eef4fb]">
-                      <TableRow className="hover:bg-[#eef4fb]">
+                    <TableHeader className="bg-muted">
+                      <TableRow className="hover:bg-muted">
                         <TableHead className="min-w-64 px-3 text-primary">
                           Nombre detectado
                         </TableHead>
@@ -2122,7 +2175,7 @@ function App() {
                     </TableHeader>
                     <TableBody>
                       {teacherDirectoryDraft.map((teacher, teacherIndex) => (
-                        <TableRow key={teacher.teacherKey} className="hover:bg-[#fff8e5]/55">
+                        <TableRow key={teacher.teacherKey} className="hover:bg-accent/15">
                           <TableCell className="px-3 py-2 text-sm text-muted-foreground">
                             {teacher.sourceName}
                           </TableCell>
@@ -2247,8 +2300,8 @@ function App() {
               <div className="p-5">
                 <div className="overflow-hidden rounded-lg border border-border">
                   <Table>
-                    <TableHeader className="bg-[#eef4fb]">
-                      <TableRow className="hover:bg-[#eef4fb]">
+                    <TableHeader className="bg-muted">
+                      <TableRow className="hover:bg-muted">
                         {renderCalendarSearchHead(
                           "name",
                           calendarSearchSelection.kind === "teacher" ? "Materia" : "Maestro",
@@ -2290,7 +2343,7 @@ function App() {
                       {calendarSearchResults.map((result, index) => (
                         <TableRow
                           key={`${result.sheetLabel}-${result.subject}-${result.teacher}-${index}`}
-                          className="hover:bg-[#fff8e5]/55"
+                          className="hover:bg-accent/15"
                         >
                           <TableCell className="px-3 py-2 font-medium text-foreground">
                             {calendarSearchSelection.kind === "teacher"
@@ -2374,7 +2427,7 @@ function App() {
                 {periods.map((period) => (
                   <div
                     key={period.id}
-                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-[#eef4fb]"
+                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted"
                   >
                     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                       <div>
@@ -2386,7 +2439,7 @@ function App() {
                             variant={period.status === "Activo" ? "secondary" : "outline"}
                             className={
                               period.status === "Activo"
-                                ? "border-blue-100 bg-blue-50 text-blue-800"
+                                ? "border-primary/25 bg-primary/10 text-primary"
                                 : ""
                             }
                           >
@@ -2667,7 +2720,7 @@ function App() {
                   </div>
                 </section>
 
-                <section className="rounded-lg border border-border bg-[#f8fbff] p-4 text-sm text-muted-foreground">
+                <section className="rounded-lg border border-border bg-muted/45 p-4 text-sm text-muted-foreground">
                   Los títulos y nombres de maestros se toman del directorio de maestros.
                 </section>
               </div>
@@ -2693,7 +2746,7 @@ function App() {
       {isParsingPdf ? (
         <div className="fixed inset-0 z-[55] flex items-center justify-center bg-slate-950/35 p-5">
           <div className="flex w-full max-w-sm items-center gap-4 rounded-lg border border-border bg-card p-5 shadow-2xl">
-            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-[#fff8e5] text-primary">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-accent/20 text-primary">
               <LoaderCircle className="size-5 animate-spin" />
             </div>
             <div>
@@ -2711,7 +2764,7 @@ function App() {
       {isExporting ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-5">
           <div className="flex w-full max-w-sm items-center gap-4 rounded-lg border border-border bg-card p-5 shadow-2xl">
-            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-[#fff8e5] text-primary">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-accent/20 text-primary">
               <LoaderCircle className="size-5 animate-spin" />
             </div>
             <div>
@@ -2735,7 +2788,7 @@ function App() {
             transform: `translate3d(${dragPreview.left}px, ${dragPreview.top}px, 0)`,
           }}
         >
-          <div className="grid grid-cols-[210px_minmax(220px,1fr)_minmax(180px,0.8fr)_112px_80px] items-center gap-0 bg-[#fff8e5] text-sm">
+          <div className="grid grid-cols-[210px_minmax(220px,1fr)_minmax(180px,0.8fr)_112px_80px] items-center gap-0 bg-accent/20 text-sm">
             <div className="px-3 py-2 text-primary">{draggedPreviewRow.time}</div>
             <div className="truncate px-3 py-2 text-foreground">
               {draggedPreviewRow.subject}
@@ -2785,9 +2838,9 @@ type AppSelectProps = {
 
 function EmptyCalendarState({ onSelectPdf }: { onSelectPdf: () => void }) {
   return (
-    <div className="flex min-h-[480px] w-full items-center justify-center rounded-lg border border-dashed border-border bg-[#f8fbff] p-8 text-center">
+    <div className="flex min-h-[480px] w-full items-center justify-center rounded-lg border border-dashed border-border bg-muted/45 p-8 text-center">
       <div className="flex max-w-md flex-col items-center">
-        <div className="flex size-12 items-center justify-center rounded-lg border border-accent/70 bg-[#fff8e5] text-primary">
+        <div className="flex size-12 items-center justify-center rounded-lg border border-accent/70 bg-accent/20 text-primary">
           <Upload className="size-6" />
         </div>
         <h3 className="mt-5 text-xl font-semibold text-foreground">
@@ -2879,7 +2932,7 @@ function AppSelect({ id, value, options, onChange }: AppSelectProps) {
                 className={`flex h-9 w-full items-center rounded-md px-3 text-left text-sm transition-colors ${
                   isSelected
                     ? "bg-primary text-primary-foreground"
-                    : "text-foreground hover:bg-[#eef4fb] hover:text-primary"
+                    : "text-foreground hover:bg-muted hover:text-primary"
                 }`}
                 onClick={() => {
                   onChange(option.value);

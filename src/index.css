@@ -32,6 +32,7 @@
 
 :root {
   --radius: 0.5rem;
+  color-scheme: light;
   --background: #f4f7fc;
   --foreground: #12213b;
   --card: #ffffff;
@@ -50,6 +51,28 @@
   --border: #d5deec;
   --input: #d5deec;
   --ring: #d6a633;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0f1724;
+  --foreground: #e7edf7;
+  --card: #172234;
+  --card-foreground: #e7edf7;
+  --popover: #172234;
+  --popover-foreground: #e7edf7;
+  --primary: #8ebbf1;
+  --primary-foreground: #06111f;
+  --secondary: #25344b;
+  --secondary-foreground: #d7e6fb;
+  --muted: #1e2b3f;
+  --muted-foreground: #a8b7cb;
+  --accent: #f0c75a;
+  --accent-foreground: #211702;
+  --destructive: #f27474;
+  --border: #33435c;
+  --input: #3a4b64;
+  --ring: #f0c75a;
 }
 
 * {

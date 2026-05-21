@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AppMonroy Horarios",
+  "productName": "Generador de Formatos",
   "version": "0.1.0",
   "identifier": "com.appmonroy.horarios",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "AppMonroy Horarios",
+        "title": "Generador de Formatos",
         "width": 1180,
         "height": 760,
         "minWidth": 980,
