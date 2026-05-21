@@ -1,0 +1,79 @@
+{
+  "template": "FormatoWordUAS.docx",
+  "capturedFrom": "word/document.xml",
+  "notes": [
+    "Positions are stored in Word EMUs from the drawing anchors and in points from the VML fallback.",
+    "Both images are anchored behind text, allow overlap, and are positioned relative to the signature paragraph.",
+    "Coordinator name should be replaced through {{NOMBRE_COORDINADOR}} once the template contains that marker."
+  ],
+  "assets": {
+    "seal": {
+      "relationshipId": "rId15",
+      "mediaPath": "word/media/image2.png",
+      "drawingName": "Image100",
+      "sourcePixels": {
+        "width": 396,
+        "height": 360
+      },
+      "anchor": {
+        "behindDoc": true,
+        "layoutInCell": true,
+        "allowOverlap": true,
+        "wrap": "none",
+        "horizontal": {
+          "relativeFrom": "column",
+          "posOffsetEmu": 2919730
+        },
+        "vertical": {
+          "relativeFrom": "paragraph",
+          "posOffsetEmu": 168910
+        },
+        "extentEmu": {
+          "cx": 1645920,
+          "cy": 1496060
+        }
+      },
+      "vmlFallback": {
+        "marginLeftPt": 229.9,
+        "marginTopPt": 13.3,
+        "widthPt": 129.6,
+        "heightPt": 117.8,
+        "zIndex": -3
+      }
+    },
+    "signature": {
+      "relationshipId": "rId16",
+      "mediaPath": "word/media/image3.png",
+      "drawingName": "Image101",
+      "sourcePixels": {
+        "width": 302,
+        "height": 265
+      },
+      "anchor": {
+        "behindDoc": true,
+        "layoutInCell": true,
+        "allowOverlap": true,
+        "wrap": "none",
+        "horizontal": {
+          "relativeFrom": "column",
+          "posOffsetEmu": 1929765
+        },
+        "vertical": {
+          "relativeFrom": "paragraph",
+          "posOffsetEmu": 164465
+        },
+        "extentEmu": {
+          "cx": 1663065,
+          "cy": 1457325
+        }
+      },
+      "vmlFallback": {
+        "marginLeftPt": 151.95,
+        "marginTopPt": 12.95,
+        "widthPt": 130.95,
+        "heightPt": 114.75,
+        "zIndex": -4
+      }
+    }
+  }
+}

@@ -2,9 +2,13 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { invoke } from "@tauri-apps/api/core";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   CalendarDays,
   ChevronDown,
   CheckCircle2,
+  FileText,
   FileSpreadsheet,
   GripVertical,
   History,
@@ -12,8 +16,10 @@ import {
   Plus,
   Save,
   Search,
+  Settings,
   Trash2,
   Upload,
+  Users,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -53,13 +59,29 @@ type SavedPeriod = {
   updatedAt?: string;
 };
 
+type GeneralConfig = {
+  coordinatorName: string;
+  signaturePath: string;
+  sealPath: string;
+};
+
+type TeacherRecord = {
+  teacherKey: string;
+  sourceName: string;
+  displayName: string;
+  title: string;
+  updatedAt?: string | null;
+};
+
 type ParsedCourse = {
   career: string;
   careerCode: string;
   period: string;
   group: string;
+  plan: string;
   subject: string;
   teacher: string;
+  teacherKey?: string;
   monday?: string | null;
   tuesday?: string | null;
   wednesday?: string | null;
@@ -77,6 +99,8 @@ type ExamRow = {
   subject: string;
   teacher: string;
   group: string;
+  plan?: string;
+  teacherKey?: string;
 };
 
 type TableBlock = {
@@ -111,6 +135,44 @@ type DragPreview = {
   height: number;
 };
 
+type CalendarSearchKind = "teacher" | "subject";
+
+type CalendarSearchSelection = {
+  kind: CalendarSearchKind;
+  value: string;
+};
+
+type CalendarSearchSortKey =
+  | "name"
+  | "career"
+  | "group"
+  | "plan"
+  | "date"
+  | "time"
+  | "sheet";
+
+type CalendarSearchSort = {
+  key: CalendarSearchSortKey;
+  direction: "asc" | "desc";
+};
+
+type CalendarSearchSuggestion = CalendarSearchSelection & {
+  count: number;
+};
+
+type CalendarSearchResult = {
+  teacher: string;
+  subject: string;
+  career: string;
+  group: string;
+  plan?: string;
+  dateValue: string;
+  date: string;
+  day: string;
+  time: string;
+  sheetLabel: string;
+};
+
 type DragContext = {
   sheetLabel: string;
   blockIndex: number;
@@ -130,6 +192,21 @@ function getTimeStart(time: string) {
 
 function getTimeEnd(time: string) {
   return time.split("-")[1] ?? "";
+}
+
+function normalizeTimeInput(value: string) {
+  const cleaned = value.replace(/[^\d:]/g, "").slice(0, 5);
+  return cleaned;
+}
+
+function formatTimeInput(value: string) {
+  const match = value.match(/^(\d{1,2}):?(\d{0,2})$/);
+  if (!match) return value;
+
+  const hour = Math.min(Number.parseInt(match[1] || "0", 10), 23);
+  const minute = Math.min(Number.parseInt(match[2] || "0", 10), 59);
+
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
 function parseLocalDate(value: string) {
@@ -152,6 +229,10 @@ function toDateInputValue(date: Date) {
 
 function getTodayDateInput() {
   return toDateInputValue(new Date());
+}
+
+function getCurrentOfficeYear() {
+  return String(new Date().getFullYear()).slice(-2);
 }
 
 function capitalize(value: string) {
@@ -188,6 +269,10 @@ function formatSheetLabel(firstDate: Date, secondDate: Date, careerCode: string)
 
 function getCareerCodeFromSheetLabel(label: string) {
   return label.match(/\b(LISI|LI)$/)?.[1] ?? "LI";
+}
+
+function getCareerCodeFromRow(row: ExamRow, sheetLabel: string) {
+  return row.group.match(/^([A-Z]{2,})\b/)?.[1] ?? getCareerCodeFromSheetLabel(sheetLabel);
 }
 
 function getCareerName(courses: ParsedCourse[], careerCode: string) {
@@ -258,6 +343,8 @@ function rowsForGroupAndDate(courses: ParsedCourse[], date: Date) {
         subject: course.subject,
         teacher: course.teacher,
         group: formatGroupLabel(course),
+        plan: course.plan,
+        teacherKey: course.teacherKey,
       };
     })
     .filter((row) => row.time)
@@ -325,6 +412,240 @@ function buildSheetsFromSchedule(schedule: ParsedSchedule, startDateValue: strin
   return sheets;
 }
 
+function normalizeTeacherTitle(title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) return "";
+  return trimmed.endsWith(".") ? trimmed : `${trimmed}.`;
+}
+
+function normalizeTeacherKey(name: string) {
+  return name
+    .split(/\s+/)
+    .join(" ")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function getTeacherDirectoryMap(records: TeacherRecord[]) {
+  return new Map(records.map((record) => [record.teacherKey, record]));
+}
+
+function formatTeacherNameWithDirectory(fallbackName: string, record?: TeacherRecord) {
+  const displayName = record?.displayName.trim() || fallbackName.trim();
+  const title = normalizeTeacherTitle(record?.title ?? "");
+  return title ? `${title} ${displayName}` : displayName;
+}
+
+function applyTeacherDirectoryToCourses(
+  courses: ParsedCourse[],
+  directory: TeacherRecord[],
+) {
+  const directoryMap = getTeacherDirectoryMap(directory);
+
+  return courses.map((course) => {
+    const teacherKey = course.teacherKey || normalizeTeacherKey(course.teacher);
+    const teacherRecord = directoryMap.get(teacherKey);
+
+    return {
+      ...course,
+      teacherKey,
+      teacher: formatTeacherNameWithDirectory(course.teacher, teacherRecord),
+    };
+  });
+}
+
+function applyTeacherDirectoryToSheets(
+  sheets: SheetPlan[],
+  directory: TeacherRecord[],
+) {
+  const directoryMap = getTeacherDirectoryMap(directory);
+
+  return sheets.map((sheet) => ({
+    ...sheet,
+    blocks: sheet.blocks.map((block) => ({
+      ...block,
+      rows: block.rows.map((row) => {
+        const teacherKey = row.teacherKey || normalizeTeacherKey(row.teacher);
+        const teacherRecord = directoryMap.get(teacherKey);
+        if (!teacherRecord) return row;
+
+        return {
+          ...row,
+          teacherKey,
+          teacher: formatTeacherNameWithDirectory(row.teacher, teacherRecord),
+        };
+      }),
+    })),
+  }));
+}
+
+function clearDeletedTeachersFromSheets(
+  sheets: SheetPlan[],
+  deletedTeachers: TeacherRecord[],
+) {
+  if (deletedTeachers.length === 0) return sheets;
+
+  const deletedMap = getTeacherDirectoryMap(deletedTeachers);
+
+  return sheets.map((sheet) => ({
+    ...sheet,
+    blocks: sheet.blocks.map((block) => ({
+      ...block,
+      rows: block.rows.map((row) => {
+        if (!row.teacherKey) return row;
+        const deletedTeacher = deletedMap.get(row.teacherKey);
+        if (!deletedTeacher) return row;
+
+        return {
+          ...row,
+          teacher: deletedTeacher.sourceName,
+        };
+      }),
+    })),
+  }));
+}
+
+function normalizeSearchValue(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function getCalendarSearchResults(
+  sheets: SheetPlan[],
+  selection: CalendarSearchSelection | null,
+) {
+  if (!selection) return [];
+
+  const results: CalendarSearchResult[] = [];
+  sheets.forEach((sheet) => {
+    sheet.blocks.forEach((block) => {
+      block.rows.forEach((row) => {
+        const matches =
+          selection.kind === "teacher"
+            ? row.teacher === selection.value
+            : row.subject === selection.value;
+
+        if (!matches) return;
+
+        results.push({
+          teacher: row.teacher,
+          subject: row.subject,
+          career: getCareerCodeFromRow(row, sheet.label),
+          group: row.group,
+          plan: row.plan,
+          dateValue: block.date,
+          date: formatCompactDateMx(block.date),
+          day: block.day,
+          time: row.time,
+          sheetLabel: sheet.label,
+        });
+      });
+    });
+  });
+
+  return results.sort((left, right) => {
+    const dateComparison = left.date.localeCompare(right.date);
+    if (dateComparison !== 0) return dateComparison;
+    return left.time.localeCompare(right.time);
+  });
+}
+
+function getCalendarSearchSortValue(
+  result: CalendarSearchResult,
+  selection: CalendarSearchSelection | null,
+  key: CalendarSearchSortKey,
+) {
+  switch (key) {
+    case "name":
+      return selection?.kind === "teacher" ? result.subject : result.teacher;
+    case "career":
+      return result.career;
+    case "group":
+      return result.group;
+    case "plan":
+      return result.plan ?? "";
+    case "date":
+      return result.dateValue;
+    case "time":
+      return result.time;
+    case "sheet":
+      return result.sheetLabel;
+  }
+}
+
+function sortCalendarSearchResults(
+  results: CalendarSearchResult[],
+  selection: CalendarSearchSelection | null,
+  sort: CalendarSearchSort,
+) {
+  return results
+    .map((result, index) => ({ result, index }))
+    .sort((left, right) => {
+      const leftValue = getCalendarSearchSortValue(left.result, selection, sort.key);
+      const rightValue = getCalendarSearchSortValue(right.result, selection, sort.key);
+      const comparison = leftValue.localeCompare(rightValue, "es-MX", {
+        numeric: true,
+        sensitivity: "base",
+      });
+
+      if (comparison !== 0) {
+        return sort.direction === "asc" ? comparison : -comparison;
+      }
+
+      const dateComparison = left.result.dateValue.localeCompare(right.result.dateValue);
+      if (dateComparison !== 0) return dateComparison;
+
+      const timeComparison = left.result.time.localeCompare(right.result.time);
+      if (timeComparison !== 0) return timeComparison;
+
+      return left.index - right.index;
+    })
+    .map(({ result }) => result);
+}
+
+function getCalendarSearchSuggestions(sheets: SheetPlan[], query: string) {
+  const normalizedQuery = normalizeSearchValue(query);
+  if (!normalizedQuery) return [];
+
+  const suggestions = new Map<string, CalendarSearchSuggestion>();
+
+  sheets.forEach((sheet) => {
+    sheet.blocks.forEach((block) => {
+      block.rows.forEach((row) => {
+        [
+          { kind: "teacher" as const, value: row.teacher },
+          { kind: "subject" as const, value: row.subject },
+        ].forEach((candidate) => {
+          const value = candidate.value.trim();
+          if (!value || !normalizeSearchValue(value).includes(normalizedQuery)) return;
+
+          const key = `${candidate.kind}:${value}`;
+          const current = suggestions.get(key);
+          suggestions.set(key, {
+            ...candidate,
+            value,
+            count: (current?.count ?? 0) + 1,
+          });
+        });
+      });
+    });
+  });
+
+  return Array.from(suggestions.values())
+    .sort((left, right) => {
+      if (left.kind !== right.kind) {
+        return left.kind === "teacher" ? -1 : 1;
+      }
+      return left.value.localeCompare(right.value);
+    })
+    .slice(0, 10);
+}
+
 function App() {
   const [periods, setPeriods] = useState<SavedPeriod[]>([]);
   const [activePeriod, setActivePeriod] = useState<SavedPeriod | null>(null);
@@ -338,17 +659,61 @@ function App() {
   const [parsedCourseCount, setParsedCourseCount] = useState(0);
   const [isPeriodsOpen, setIsPeriodsOpen] = useState(false);
   const [isStartDateOpen, setIsStartDateOpen] = useState(false);
+  const [isWordModalOpen, setIsWordModalOpen] = useState(false);
+  const [isGeneralConfigOpen, setIsGeneralConfigOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingWord, setIsExportingWord] = useState(false);
   const [isParsingPdf, setIsParsingPdf] = useState(false);
   const [periodToDelete, setPeriodToDelete] = useState<SavedPeriod | null>(null);
+  const [wordOfficeYear, setWordOfficeYear] = useState(() => getCurrentOfficeYear());
+  const [wordStartFolio, setWordStartFolio] = useState("96");
+  const [wordOfficeDate, setWordOfficeDate] = useState(() => getTodayDateInput());
+  const [wordPeriod, setWordPeriod] = useState(() => `${periodName} ${periodRange}`);
+  const [wordSchoolYear, setWordSchoolYear] = useState(() => `Ciclo Escolar ${schoolYear}`);
+  const [wordExamStartDate, setWordExamStartDate] = useState(() => examStartDate);
+  const [wordHourStart, setWordHourStart] = useState("09:00");
+  const [wordHourEnd, setWordHourEnd] = useState("17:00");
+  const [generalConfig, setGeneralConfig] = useState<GeneralConfig>({
+    coordinatorName: "",
+    signaturePath: "",
+    sealPath: "",
+  });
+  const [generalConfigDraft, setGeneralConfigDraft] = useState<GeneralConfig>({
+    coordinatorName: "",
+    signaturePath: "",
+    sealPath: "",
+  });
+  const [teacherDirectory, setTeacherDirectory] = useState<TeacherRecord[]>([]);
+  const [teacherDirectoryDraft, setTeacherDirectoryDraft] = useState<TeacherRecord[]>([]);
+  const [isTeacherDirectoryOpen, setIsTeacherDirectoryOpen] = useState(false);
+  const [calendarSearchQuery, setCalendarSearchQuery] = useState("");
+  const [isCalendarSearchOpen, setIsCalendarSearchOpen] = useState(false);
+  const [calendarSearchSelection, setCalendarSearchSelection] =
+    useState<CalendarSearchSelection | null>(null);
+  const [calendarSearchSort, setCalendarSearchSort] = useState<CalendarSearchSort>({
+    key: "name",
+    direction: "asc",
+  });
   const [draggedRow, setDraggedRow] = useState<DraggedRow | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
   const [statusMessage, setStatusMessage] = useState("SQLite local listo");
   const dragContextRef = useRef<DragContext | null>(null);
+  const calendarSearchRef = useRef<HTMLDivElement | null>(null);
+
+  function closeOnBackdropPointerDown(
+    event: ReactPointerEvent<HTMLDivElement>,
+    onClose: () => void,
+  ) {
+    if (event.target === event.currentTarget) {
+      onClose();
+    }
+  }
 
   useEffect(() => {
     loadPeriods();
+    loadGeneralConfig();
+    loadTeacherDirectory();
   }, []);
 
   useEffect(() => {
@@ -423,6 +788,19 @@ function App() {
     };
   }, [draggedRow]);
 
+  useEffect(() => {
+    if (!isCalendarSearchOpen) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!calendarSearchRef.current?.contains(event.target as Node)) {
+        setIsCalendarSearchOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isCalendarSearchOpen]);
+
   async function loadPeriods() {
     try {
       const storedPeriods = await invoke<SavedPeriod[]>("list_periods");
@@ -431,6 +809,97 @@ function App() {
       setStatusMessage("Periodos cargados desde SQLite");
     } catch (error) {
       setStatusMessage(`No se pudieron cargar los periodos: ${String(error)}`);
+    }
+  }
+
+  async function loadTeacherDirectory() {
+    try {
+      const storedDirectory = await invoke<TeacherRecord[]>("list_teacher_directory");
+      setTeacherDirectory(storedDirectory);
+      setTeacherDirectoryDraft(storedDirectory);
+    } catch (error) {
+      setStatusMessage(`No se pudo cargar el directorio de maestros: ${String(error)}`);
+    }
+  }
+
+  async function loadGeneralConfig() {
+    try {
+      const storedConfig = await invoke<GeneralConfig>("get_general_config");
+      setGeneralConfig(storedConfig);
+      setGeneralConfigDraft(storedConfig);
+    } catch (error) {
+      setStatusMessage(`No se pudo cargar la configuración general: ${String(error)}`);
+    }
+  }
+
+  function openGeneralConfig() {
+    setGeneralConfigDraft(generalConfig);
+    setIsGeneralConfigOpen(true);
+  }
+
+  function openTeacherDirectory() {
+    setTeacherDirectoryDraft(teacherDirectory);
+    setIsTeacherDirectoryOpen(true);
+  }
+
+  async function saveTeacherDirectory() {
+    try {
+      const draftKeys = new Set(teacherDirectoryDraft.map((record) => record.teacherKey));
+      const deletedTeachers = teacherDirectory.filter(
+        (record) => !draftKeys.has(record.teacherKey),
+      );
+      const savedDirectory = await invoke<TeacherRecord[]>("save_teacher_directory", {
+        records: teacherDirectoryDraft.map((record) => ({
+          ...record,
+          sourceName: record.sourceName.trim(),
+          displayName: record.displayName.trim(),
+          title: normalizeTeacherTitle(record.title),
+        })),
+      });
+      setTeacherDirectory(savedDirectory);
+      setTeacherDirectoryDraft(savedDirectory);
+      setGeneratedSheets((currentSheets) =>
+        applyTeacherDirectoryToSheets(
+          clearDeletedTeachersFromSheets(currentSheets, deletedTeachers),
+          savedDirectory,
+        ),
+      );
+      setIsTeacherDirectoryOpen(false);
+      setStatusMessage("Directorio de maestros guardado");
+    } catch (error) {
+      setStatusMessage(`No se pudo guardar el directorio de maestros: ${String(error)}`);
+    }
+  }
+
+  async function selectGeneralConfigImage(field: "signaturePath" | "sealPath") {
+    try {
+      const file = await open({
+        multiple: false,
+        filters: [{ name: "Imagen", extensions: ["png", "jpg", "jpeg"] }],
+      });
+
+      if (typeof file === "string") {
+        setGeneralConfigDraft((currentConfig) => ({
+          ...currentConfig,
+          [field]: file,
+        }));
+      }
+    } catch (error) {
+      setStatusMessage(`No se pudo seleccionar la imagen: ${String(error)}`);
+    }
+  }
+
+  async function saveGeneralConfig() {
+    try {
+      const savedConfig = await invoke<GeneralConfig>("save_general_config", {
+        config: generalConfigDraft,
+      });
+      setGeneralConfig(savedConfig);
+      setGeneralConfigDraft(savedConfig);
+      setIsGeneralConfigOpen(false);
+      setStatusMessage("Configuración general guardada");
+    } catch (error) {
+      setStatusMessage(`No se pudo guardar la configuración general: ${String(error)}`);
     }
   }
 
@@ -444,10 +913,17 @@ function App() {
     setParsedCourseCount(0);
     setGeneratedSheets([]);
     setSelectedSheet("");
+    setCalendarSearchQuery("");
+    setIsCalendarSearchOpen(false);
+    setCalendarSearchSelection(null);
+    setCalendarSearchSort({ key: "name", direction: "asc" });
   }
 
   function applyActivePeriod(period: SavedPeriod) {
-    const restoredSheets = period.generatedSheets ?? [];
+    const restoredSheets = applyTeacherDirectoryToSheets(
+      period.generatedSheets ?? [],
+      teacherDirectory,
+    );
     const restoredSelectedSheet =
       period.selectedSheet && restoredSheets.some((sheet) => sheet.label === period.selectedSheet)
         ? period.selectedSheet
@@ -540,10 +1016,78 @@ function App() {
     }
   }
 
+  function openWordModal() {
+    if (generatedSheets.length === 0) {
+      setStatusMessage("Carga y genera un calendario antes de generar Word.");
+      return;
+    }
+
+    setWordPeriod(`${periodName} ${periodRange}`);
+    setWordSchoolYear(`Ciclo Escolar ${schoolYear}`);
+    setWordExamStartDate(examStartDate);
+    setWordHourStart("09:00");
+    setWordHourEnd("17:00");
+    setIsWordModalOpen(true);
+  }
+
+  async function exportCurrentWord() {
+    if (isExportingWord) return;
+
+    if (generatedSheets.length === 0) {
+      setStatusMessage("Carga y genera un calendario antes de generar Word.");
+      return;
+    }
+
+    const folio = Number.parseInt(wordStartFolio, 10);
+    if (Number.isNaN(folio) || folio < 1) {
+      setStatusMessage("El folio inicial debe ser un número mayor a cero.");
+      return;
+    }
+
+    const outputDir = await open({
+      directory: true,
+      multiple: false,
+      title: "Selecciona la carpeta para guardar los documentos Word",
+    });
+
+    if (typeof outputDir !== "string") return;
+
+    try {
+      setIsExportingWord(true);
+      setStatusMessage("Generando documentos Word...");
+      await invoke("export_word", {
+        payload: {
+          wordPeriod,
+          wordSchoolYear,
+          officeYear: wordOfficeYear,
+          startFolio: folio,
+          officeDate: wordOfficeDate,
+          examStartDate: wordExamStartDate,
+          hourStart: wordHourStart,
+          hourEnd: wordHourEnd,
+          coordinatorName: generalConfig.coordinatorName,
+          signaturePath: generalConfig.signaturePath,
+          sealPath: generalConfig.sealPath,
+          teacherTitles: {},
+          sheets: generatedSheets,
+        },
+        outputDir,
+      });
+      setIsWordModalOpen(false);
+      setStatusMessage("Documentos Word generados correctamente");
+    } catch (error) {
+      setStatusMessage(`No se pudo generar Word: ${String(error)}`);
+    } finally {
+      setIsExportingWord(false);
+    }
+  }
+
   function startOverSession() {
     resetWorkArea();
     setIsPeriodsOpen(false);
     setIsStartDateOpen(false);
+    setIsWordModalOpen(false);
+    setIsTeacherDirectoryOpen(false);
     setPeriodToDelete(null);
     setStatusMessage("Sesión reiniciada");
   }
@@ -607,7 +1151,17 @@ function App() {
       const parsedSchedule = await invoke<ParsedSchedule>("parse_schedule_pdf", {
         pdfPath: selectedPdfPath,
       });
-      const sheets = buildSheetsFromSchedule(parsedSchedule, examStartDate);
+      const syncedDirectory = await invoke<TeacherRecord[]>("sync_teacher_directory", {
+        teachers: parsedSchedule.courses.map((course) => course.teacher),
+      });
+      setTeacherDirectory(syncedDirectory);
+      setTeacherDirectoryDraft(syncedDirectory);
+
+      const titledSchedule = {
+        ...parsedSchedule,
+        courses: applyTeacherDirectoryToCourses(parsedSchedule.courses, syncedDirectory),
+      };
+      const sheets = buildSheetsFromSchedule(titledSchedule, examStartDate);
 
       setGeneratedSheets(sheets);
       setSelectedSheet(sheets[0]?.label ?? "");
@@ -713,7 +1267,15 @@ function App() {
             return {
               ...block,
               rows: block.rows.map((row, currentRowIndex) =>
-                currentRowIndex === rowIndex ? { ...row, [field]: value } : row,
+                currentRowIndex === rowIndex
+                  ? {
+                      ...row,
+                      [field]: value,
+                      ...(field === "teacher"
+                        ? { teacherKey: normalizeTeacherKey(value) }
+                        : {}),
+                    }
+                  : row,
               ),
             };
           }),
@@ -858,6 +1420,43 @@ function App() {
       : "";
   }
 
+  function toggleCalendarSearchSort(key: CalendarSearchSortKey) {
+    setCalendarSearchSort((currentSort) =>
+      currentSort.key === key
+        ? {
+            key,
+            direction: currentSort.direction === "asc" ? "desc" : "asc",
+          }
+        : { key, direction: "asc" },
+    );
+  }
+
+  function renderCalendarSearchHead(
+    key: CalendarSearchSortKey,
+    label: string,
+    className: string,
+  ) {
+    const isActive = calendarSearchSort.key === key;
+    const SortIcon = !isActive
+      ? ArrowUpDown
+      : calendarSearchSort.direction === "asc"
+        ? ArrowUp
+        : ArrowDown;
+
+    return (
+      <TableHead className={className}>
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 text-left font-semibold text-primary transition-colors hover:text-primary/80"
+          onClick={() => toggleCalendarSearchSort(key)}
+        >
+          <span>{label}</span>
+          <SortIcon className="size-3.5 shrink-0" />
+        </button>
+      </TableHead>
+    );
+  }
+
   const draggedPreviewBlock = draggedRow
     ? generatedSheets.find((sheet) => sheet.label === draggedRow.sheetLabel)?.blocks[
         draggedRow.blockIndex
@@ -867,6 +1466,15 @@ function App() {
     ? draggedPreviewBlock?.rows[draggedRow.rowIndex] ?? null
     : null;
   const hasGeneratedCalendar = generatedSheets.length > 0;
+  const calendarSearchSuggestions = getCalendarSearchSuggestions(
+    generatedSheets,
+    calendarSearchQuery,
+  );
+  const calendarSearchResults = sortCalendarSearchResults(
+    getCalendarSearchResults(generatedSheets, calendarSearchSelection),
+    calendarSearchSelection,
+    calendarSearchSort,
+  );
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#d9e6f7,transparent_32%),radial-gradient(circle_at_top_right,#f6e2a4,transparent_26%),linear-gradient(180deg,#f7f9fd_0%,#edf3fb_100%)]">
@@ -878,6 +1486,22 @@ function App() {
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Config general"
+              onClick={openGeneralConfig}
+            >
+              <Settings />
+            </Button>
+            <Button
+              variant="outline"
+              aria-label="Directorio de maestros"
+              onClick={openTeacherDirectory}
+            >
+              <Users />
+              Directorio de maestros
+            </Button>
             <Button variant="outline" onClick={startOverSession}>
               <Plus />
               Empezar de nuevo
@@ -933,9 +1557,63 @@ function App() {
                     </CardDescription>
                   </div>
                   {hasGeneratedCalendar ? (
-                    <div className="relative min-w-0 flex-1 sm:w-72 sm:flex-none">
+                    <div
+                      ref={calendarSearchRef}
+                      className="relative min-w-0 flex-1 sm:w-80 sm:flex-none"
+                    >
                       <Search className="absolute left-2.5 top-2 size-4 text-muted-foreground" />
-                      <Input className="pl-8" placeholder="Buscar profesor o materia" />
+                      <Input
+                        className="pl-8"
+                        placeholder="Buscar profesor o materia"
+                        value={calendarSearchQuery}
+                        onChange={(event) => {
+                          setCalendarSearchQuery(event.currentTarget.value);
+                          setIsCalendarSearchOpen(true);
+                        }}
+                        onFocus={() => setIsCalendarSearchOpen(true)}
+                      />
+                      {isCalendarSearchOpen && calendarSearchQuery.trim() ? (
+                        <div className="absolute right-0 top-11 z-50 max-h-96 w-full overflow-hidden rounded-lg border border-border bg-card shadow-xl ring-1 ring-primary/10 sm:w-[28rem]">
+                          {calendarSearchSuggestions.length ? (
+                            <ScrollArea className="max-h-96">
+                              <div className="p-1">
+                                {calendarSearchSuggestions.map((suggestion) => (
+                                  <button
+                                    key={`${suggestion.kind}-${suggestion.value}`}
+                                    type="button"
+                                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors hover:bg-[#eef4fb] hover:text-primary"
+                                    onClick={() => {
+                                      setCalendarSearchSelection({
+                                        kind: suggestion.kind,
+                                        value: suggestion.value,
+                                      });
+                                      setCalendarSearchSort({ key: "name", direction: "asc" });
+                                      setCalendarSearchQuery(suggestion.value);
+                                      setIsCalendarSearchOpen(false);
+                                    }}
+                                  >
+                                    <span className="min-w-0 whitespace-normal break-words leading-snug">
+                                      {suggestion.value}
+                                    </span>
+                                    <span className="flex shrink-0 items-center gap-2 pt-0.5">
+                                      <Badge variant="outline" className="whitespace-nowrap">
+                                        {suggestion.kind === "teacher" ? "Maestro" : "Materia"}
+                                      </Badge>
+                                      <span className="min-w-5 text-right text-xs text-muted-foreground">
+                                        {suggestion.count}
+                                      </span>
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </ScrollArea>
+                          ) : (
+                            <div className="px-3 py-3 text-sm text-muted-foreground">
+                              Sin coincidencias
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1055,6 +1733,9 @@ function App() {
                                           <TableHead className="w-28 px-3 text-center text-primary">
                                             Grupo
                                           </TableHead>
+                                          <TableHead className="w-24 px-3 text-center text-primary">
+                                            Plan
+                                          </TableHead>
                                           <TableHead className="w-20 px-3 text-center text-primary">
                                             Orden
                                           </TableHead>
@@ -1073,17 +1754,16 @@ function App() {
                                           >
                                             <TableCell className="px-3 py-2">
                                               <div className="flex min-w-48 items-center gap-2">
-                                                <Input
+                                                <TimeInput
                                                   aria-label="Hora inicial"
-                                                  type="time"
                                                   value={getTimeStart(row.time)}
-                                                  onChange={(event) =>
+                                                  onChange={(value) =>
                                                     updateRowTime(
                                                       sheet.label,
                                                       blockIndex,
                                                       rowIndex,
                                                       "start",
-                                                      event.currentTarget.value,
+                                                      value,
                                                     )
                                                   }
                                                   className="h-8 w-24"
@@ -1091,17 +1771,16 @@ function App() {
                                                 <span className="text-xs text-muted-foreground">
                                                   a
                                                 </span>
-                                                <Input
+                                                <TimeInput
                                                   aria-label="Hora final"
-                                                  type="time"
                                                   value={getTimeEnd(row.time)}
-                                                  onChange={(event) =>
+                                                  onChange={(value) =>
                                                     updateRowTime(
                                                       sheet.label,
                                                       blockIndex,
                                                       rowIndex,
                                                       "end",
-                                                      event.currentTarget.value,
+                                                      value,
                                                     )
                                                   }
                                                   className="h-8 w-24"
@@ -1154,6 +1833,21 @@ function App() {
                                               />
                                             </TableCell>
                                             <TableCell className="px-3 py-2">
+                                              <Input
+                                                value={row.plan ?? ""}
+                                                onChange={(event) =>
+                                                  updateRow(
+                                                    sheet.label,
+                                                    blockIndex,
+                                                    rowIndex,
+                                                    "plan",
+                                                    event.currentTarget.value,
+                                                  )
+                                                }
+                                                className="h-8 text-center"
+                                              />
+                                            </TableCell>
+                                            <TableCell className="px-3 py-2">
                                               <button
                                                 type="button"
                                                 className="mx-auto flex size-8 cursor-grab touch-none select-none items-center justify-center rounded-md border border-input bg-card text-primary transition-colors hover:bg-[#eef4fb] active:cursor-grabbing"
@@ -1175,7 +1869,7 @@ function App() {
                                         {block.rows.length === 0 ? (
                                           <TableRow>
                                             <TableCell
-                                              colSpan={5}
+                                              colSpan={6}
                                               className="h-24 text-center text-sm text-muted-foreground"
                                             >
                                               No hay materias detectadas para este grupo.
@@ -1229,6 +1923,19 @@ function App() {
                     )}
                     {isExporting ? "Exportando..." : "Exportar Excel"}
                   </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full justify-start"
+                    onClick={openWordModal}
+                    disabled={isExportingWord}
+                  >
+                    {isExportingWord ? (
+                      <LoaderCircle className="animate-spin" />
+                    ) : (
+                      <FileText />
+                    )}
+                    {isExportingWord ? "Generando..." : "Generar Formato Word"}
+                  </Button>
                 </CardContent>
               </Card>
             ) : null}
@@ -1248,8 +1955,393 @@ function App() {
         </section>
       </div>
 
+      {isGeneralConfigOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setIsGeneralConfigOpen(false))
+          }
+        >
+          <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  Configuración general
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Datos usados al generar los formatos Word.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Cerrar configuración general"
+                onClick={() => setIsGeneralConfigOpen(false)}
+              >
+                <X />
+              </Button>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="space-y-5 p-5">
+                <div className="space-y-2">
+                  <Label htmlFor="coordinator-name">Nombre del coordinador</Label>
+                  <Input
+                    id="coordinator-name"
+                    value={generalConfigDraft.coordinatorName}
+                    onChange={(event) => {
+                      const nextCoordinatorName = event.currentTarget.value;
+                      setGeneralConfigDraft((currentConfig) => ({
+                        ...currentConfig,
+                        coordinatorName: nextCoordinatorName,
+                      }));
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="signature-path">Firma</Label>
+                  <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                    <Input
+                      id="signature-path"
+                      value={generalConfigDraft.signaturePath}
+                      readOnly
+                      placeholder="Sin firma seleccionada"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => selectGeneralConfigImage("signaturePath")}
+                    >
+                      Seleccionar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        setGeneralConfigDraft((currentConfig) => ({
+                          ...currentConfig,
+                          signaturePath: "",
+                        }))
+                      }
+                    >
+                      Quitar
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="seal-path">Sello</Label>
+                  <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                    <Input
+                      id="seal-path"
+                      value={generalConfigDraft.sealPath}
+                      readOnly
+                      placeholder="Sin sello seleccionado"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => selectGeneralConfigImage("sealPath")}
+                    >
+                      Seleccionar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        setGeneralConfigDraft((currentConfig) => ({
+                          ...currentConfig,
+                          sealPath: "",
+                        }))
+                      }
+                    >
+                      Quitar
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </ScrollArea>
+
+            <div className="flex justify-end gap-2 border-t border-border p-5">
+              <Button variant="outline" onClick={() => setIsGeneralConfigOpen(false)}>
+                Cancelar
+              </Button>
+              <Button onClick={saveGeneralConfig}>
+                Guardar configuración
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isTeacherDirectoryOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setIsTeacherDirectoryOpen(false))
+          }
+        >
+          <div className="flex h-[88vh] max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  Directorio de maestros
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Edita el título y el nombre que se usará en tablas, Excel y Word.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Cerrar directorio de maestros"
+                onClick={() => setIsTeacherDirectoryOpen(false)}
+              >
+                <X />
+              </Button>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="p-5">
+                <div className="overflow-hidden rounded-lg border border-border">
+                  <Table>
+                    <TableHeader className="bg-[#eef4fb]">
+                      <TableRow className="hover:bg-[#eef4fb]">
+                        <TableHead className="min-w-64 px-3 text-primary">
+                          Nombre detectado
+                        </TableHead>
+                        <TableHead className="w-36 px-3 text-primary">Título</TableHead>
+                        <TableHead className="min-w-72 px-3 text-primary">
+                          Nombre en documentos
+                        </TableHead>
+                        <TableHead className="w-28 px-3 text-center text-primary">
+                          Acciones
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {teacherDirectoryDraft.map((teacher, teacherIndex) => (
+                        <TableRow key={teacher.teacherKey} className="hover:bg-[#fff8e5]/55">
+                          <TableCell className="px-3 py-2 text-sm text-muted-foreground">
+                            {teacher.sourceName}
+                          </TableCell>
+                          <TableCell className="px-3 py-2">
+                            <Input
+                              aria-label={`Título de ${teacher.sourceName}`}
+                              value={teacher.title}
+                              onChange={(event) => {
+                                const nextTitle = event.currentTarget.value;
+                                setTeacherDirectoryDraft((currentDirectory) =>
+                                  currentDirectory.map((currentTeacher, currentIndex) =>
+                                    currentIndex === teacherIndex
+                                      ? { ...currentTeacher, title: nextTitle }
+                                      : currentTeacher,
+                                  ),
+                                );
+                              }}
+                              placeholder="LIC., Dr."
+                              className="h-8"
+                            />
+                          </TableCell>
+                          <TableCell className="px-3 py-2">
+                            <Input
+                              aria-label={`Nombre editable de ${teacher.sourceName}`}
+                              value={teacher.displayName}
+                              onChange={(event) => {
+                                const nextDisplayName = event.currentTarget.value;
+                                setTeacherDirectoryDraft((currentDirectory) =>
+                                  currentDirectory.map((currentTeacher, currentIndex) =>
+                                    currentIndex === teacherIndex
+                                      ? { ...currentTeacher, displayName: nextDisplayName }
+                                      : currentTeacher,
+                                  ),
+                                );
+                              }}
+                              className="h-8"
+                            />
+                          </TableCell>
+                          <TableCell className="px-3 py-2 text-center">
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              size="sm"
+                              onClick={() =>
+                                setTeacherDirectoryDraft((currentDirectory) =>
+                                  currentDirectory.filter(
+                                    (currentTeacher) =>
+                                      currentTeacher.teacherKey !== teacher.teacherKey,
+                                  ),
+                                )
+                              }
+                            >
+                              <Trash2 />
+                              Eliminar
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {teacherDirectoryDraft.length === 0 ? (
+                        <TableRow>
+                          <TableCell
+                            colSpan={4}
+                            className="h-24 text-center text-sm text-muted-foreground"
+                          >
+                            Aún no hay maestros guardados. Se agregarán al cargar un PDF.
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            </ScrollArea>
+
+            <div className="flex justify-end gap-2 border-t border-border p-5">
+              <Button
+                variant="outline"
+                onClick={() => setIsTeacherDirectoryOpen(false)}
+              >
+                Cancelar
+              </Button>
+              <Button onClick={saveTeacherDirectory}>
+                Guardar directorio
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {calendarSearchSelection ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setCalendarSearchSelection(null))
+          }
+        >
+          <div className="flex h-[88vh] max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  {calendarSearchSelection.kind === "teacher"
+                    ? calendarSearchSelection.value
+                    : calendarSearchSelection.value}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {calendarSearchSelection.kind === "teacher"
+                    ? "Materias relacionadas con este maestro"
+                    : "Maestros relacionados con esta materia"}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Cerrar resultados"
+                onClick={() => setCalendarSearchSelection(null)}
+              >
+                <X />
+              </Button>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="p-5">
+                <div className="overflow-hidden rounded-lg border border-border">
+                  <Table>
+                    <TableHeader className="bg-[#eef4fb]">
+                      <TableRow className="hover:bg-[#eef4fb]">
+                        {renderCalendarSearchHead(
+                          "name",
+                          calendarSearchSelection.kind === "teacher" ? "Materia" : "Maestro",
+                          "min-w-56 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "career",
+                          "Carrera",
+                          "w-28 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "group",
+                          "Grupo",
+                          "w-32 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "plan",
+                          "Plan",
+                          "w-24 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "date",
+                          "Fecha",
+                          "min-w-48 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "time",
+                          "Hora",
+                          "w-36 px-3 text-primary",
+                        )}
+                        {renderCalendarSearchHead(
+                          "sheet",
+                          "Hoja",
+                          "min-w-44 px-3 text-primary",
+                        )}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {calendarSearchResults.map((result, index) => (
+                        <TableRow
+                          key={`${result.sheetLabel}-${result.subject}-${result.teacher}-${index}`}
+                          className="hover:bg-[#fff8e5]/55"
+                        >
+                          <TableCell className="px-3 py-2 font-medium text-foreground">
+                            {calendarSearchSelection.kind === "teacher"
+                              ? result.subject
+                              : result.teacher}
+                          </TableCell>
+                          <TableCell className="px-3 py-2">{result.career}</TableCell>
+                          <TableCell className="px-3 py-2">{result.group}</TableCell>
+                          <TableCell className="px-3 py-2">{result.plan ?? ""}</TableCell>
+                          <TableCell className="px-3 py-2">
+                            <div className="font-medium text-foreground">{result.day}</div>
+                            <div className="text-xs text-muted-foreground">{result.date}</div>
+                          </TableCell>
+                          <TableCell className="px-3 py-2">{result.time}</TableCell>
+                          <TableCell className="px-3 py-2 text-sm text-muted-foreground">
+                            {result.sheetLabel}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {calendarSearchResults.length === 0 ? (
+                        <TableRow>
+                          <TableCell
+                            colSpan={7}
+                            className="h-24 text-center text-sm text-muted-foreground"
+                          >
+                            No hay resultados relacionados.
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            </ScrollArea>
+
+            <div className="flex justify-end gap-2 border-t border-border p-5">
+              <Button variant="outline" onClick={() => setCalendarSearchSelection(null)}>
+                Cerrar
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {isPeriodsOpen ? (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-5">
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setIsPeriodsOpen(false))
+          }
+        >
           <div className="flex max-h-[86vh] w-full max-w-3xl flex-col rounded-lg border border-border bg-card shadow-2xl">
             <div className="flex items-start justify-between gap-4 border-b border-border p-5">
               <div>
@@ -1338,7 +2430,12 @@ function App() {
       ) : null}
 
       {periodToDelete ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-5">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setPeriodToDelete(null))
+          }
+        >
           <div className="w-full max-w-md rounded-lg border border-border bg-card shadow-2xl">
             <div className="border-b border-border p-5">
               <h2 className="text-lg font-semibold text-foreground">
@@ -1367,7 +2464,16 @@ function App() {
       ) : null}
 
       {isStartDateOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => {
+              if (!isParsingPdf) {
+                setIsStartDateOpen(false);
+              }
+            })
+          }
+        >
           <div className="w-full max-w-2xl rounded-lg border border-border bg-card shadow-2xl">
             <div className="flex items-start justify-between gap-4 border-b border-border p-5">
               <div>
@@ -1452,6 +2558,138 @@ function App() {
         </div>
       ) : null}
 
+      {isWordModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => {
+              if (!isExportingWord) {
+                setIsWordModalOpen(false);
+              }
+            })
+          }
+        >
+          <div className="flex h-[90vh] max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  Generar Formato Word
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Completa los datos del oficio antes de crear un documento por maestro.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Cerrar formato Word"
+                disabled={isExportingWord}
+                onClick={() => setIsWordModalOpen(false)}
+              >
+                <X />
+              </Button>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="space-y-6 p-5">
+                <section className="grid gap-4 md:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="word-office-year">Año de oficio</Label>
+                    <Input
+                      id="word-office-year"
+                      value={wordOfficeYear}
+                      onChange={(event) => setWordOfficeYear(event.currentTarget.value)}
+                      placeholder="26"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="word-start-folio">Folio inicial</Label>
+                    <Input
+                      id="word-start-folio"
+                      type="number"
+                      min="1"
+                      value={wordStartFolio}
+                      onChange={(event) => setWordStartFolio(event.currentTarget.value)}
+                    />
+                  </div>
+                  <div className="space-y-2 md:col-span-2">
+                    <Label htmlFor="word-office-date">Fecha del oficio</Label>
+                    <DateSelector
+                      id="word-office-date"
+                      value={wordOfficeDate}
+                      onChange={setWordOfficeDate}
+                    />
+                  </div>
+                </section>
+
+                <section className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="word-period">Periodo</Label>
+                    <Input
+                      id="word-period"
+                      value={wordPeriod}
+                      onChange={(event) => setWordPeriod(event.currentTarget.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="word-school-year">Ciclo escolar</Label>
+                    <Input
+                      id="word-school-year"
+                      value={wordSchoolYear}
+                      onChange={(event) => setWordSchoolYear(event.currentTarget.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="word-exam-start-date">Fecha inicial de exámenes</Label>
+                    <DateSelector
+                      id="word-exam-start-date"
+                      value={wordExamStartDate}
+                      onChange={setWordExamStartDate}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="word-hour-start">Hora inicio matutino</Label>
+                      <TimeInput
+                        id="word-hour-start"
+                        value={wordHourStart}
+                        onChange={setWordHourStart}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="word-hour-end">Hora inicio vespertino</Label>
+                      <TimeInput
+                        id="word-hour-end"
+                        value={wordHourEnd}
+                        onChange={setWordHourEnd}
+                      />
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-lg border border-border bg-[#f8fbff] p-4 text-sm text-muted-foreground">
+                  Los títulos y nombres de maestros se toman del directorio de maestros.
+                </section>
+              </div>
+            </ScrollArea>
+
+            <div className="flex justify-end gap-2 border-t border-border p-5">
+              <Button
+                variant="outline"
+                disabled={isExportingWord}
+                onClick={() => setIsWordModalOpen(false)}
+              >
+                Cancelar
+              </Button>
+              <Button onClick={exportCurrentWord} disabled={isExportingWord}>
+                {isExportingWord ? <LoaderCircle className="animate-spin" /> : <FileText />}
+                {isExportingWord ? "Generando..." : "Generar documentos"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {isParsingPdf ? (
         <div className="fixed inset-0 z-[55] flex items-center justify-center bg-slate-950/35 p-5">
           <div className="flex w-full max-w-sm items-center gap-4 rounded-lg border border-border bg-card p-5 shadow-2xl">
@@ -1525,6 +2763,14 @@ type DateSelectorProps = {
   "aria-label"?: string;
 };
 
+type TimeInputProps = {
+  id?: string;
+  value: string;
+  onChange: (value: string) => void;
+  className?: string;
+  "aria-label"?: string;
+};
+
 type SelectOption = {
   value: string;
   label: string;
@@ -1556,6 +2802,28 @@ function EmptyCalendarState({ onSelectPdf }: { onSelectPdf: () => void }) {
         </Button>
       </div>
     </div>
+  );
+}
+
+function TimeInput({
+  id,
+  value,
+  onChange,
+  className,
+  "aria-label": ariaLabel,
+}: TimeInputProps) {
+  return (
+    <Input
+      id={id}
+      value={value}
+      inputMode="numeric"
+      maxLength={5}
+      placeholder="HH:MM"
+      className={className}
+      aria-label={ariaLabel}
+      onChange={(event) => onChange(normalizeTimeInput(event.currentTarget.value))}
+      onBlur={(event) => onChange(formatTimeInput(event.currentTarget.value))}
+    />
   );
 }
 
@@ -1630,6 +2898,7 @@ function AppSelect({ id, value, options, onChange }: AppSelectProps) {
 
 function DateSelector({ id, value, onChange, "aria-label": ariaLabel }: DateSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const dateSelectorRef = useRef<HTMLDivElement | null>(null);
   const selectedDate = parseLocalDate(value);
   const [visibleYear, setVisibleYear] = useState(selectedDate.getFullYear());
   const [visibleMonth, setVisibleMonth] = useState(selectedDate.getMonth());
@@ -1655,8 +2924,21 @@ function DateSelector({ id, value, onChange, "aria-label": ariaLabel }: DateSele
     setIsOpen(false);
   }
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!dateSelectorRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isOpen]);
+
   return (
-    <div className="relative">
+    <div ref={dateSelectorRef} className="relative">
       <Button
         id={id}
         type="button"

@@ -1,14 +1,20 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     env,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager, State};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct AppDb {
     connection: Mutex<Connection>,
@@ -46,6 +52,24 @@ struct SavePeriodInput {
     generated_sheets: Option<Vec<ExportSheet>>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneralConfig {
+    coordinator_name: String,
+    signature_path: String,
+    seal_path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TeacherRecord {
+    teacher_key: String,
+    source_name: String,
+    display_name: String,
+    title: String,
+    updated_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ParsedSchedule {
@@ -60,6 +84,7 @@ struct ParsedCourse {
     career_code: String,
     period: String,
     group: String,
+    plan: String,
     subject: String,
     teacher: String,
     monday: Option<String>,
@@ -75,6 +100,24 @@ struct ExportPayload {
     period_name: String,
     period_range: String,
     school_year: String,
+    sheets: Vec<ExportSheet>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportWordPayload {
+    word_period: String,
+    word_school_year: String,
+    office_year: String,
+    start_folio: i64,
+    office_date: String,
+    exam_start_date: String,
+    hour_start: String,
+    hour_end: String,
+    coordinator_name: String,
+    signature_path: String,
+    seal_path: String,
+    teacher_titles: HashMap<String, String>,
     sheets: Vec<ExportSheet>,
 }
 
@@ -104,6 +147,8 @@ struct ExportRow {
     subject: String,
     teacher: String,
     group: String,
+    plan: Option<String>,
+    teacher_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -174,6 +219,26 @@ fn open_database(app: &tauri::App) -> Result<Connection, String> {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS teacher_titles (
+                teacher TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS teacher_directory (
+                teacher_key TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )
         .map_err(|error| format!("No se pudo preparar la base de datos: {error}"))?;
@@ -204,9 +269,64 @@ fn open_database(app: &tauri::App) -> Result<Connection, String> {
         "ALTER TABLE exam_periods ADD COLUMN generated_sheets TEXT NOT NULL DEFAULT '[]'",
     )?;
 
+    migrate_teacher_titles(&connection)?;
     remove_legacy_mock_periods(&connection)?;
 
     Ok(connection)
+}
+
+fn normalize_teacher_key(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .chars()
+        .map(|character| match character {
+            'á' | 'à' | 'ä' | 'â' | 'Á' | 'À' | 'Ä' | 'Â' => 'A',
+            'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'E',
+            'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'I',
+            'ó' | 'ò' | 'ö' | 'ô' | 'Ó' | 'Ò' | 'Ö' | 'Ô' => 'O',
+            'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'U',
+            'ñ' | 'Ñ' => 'N',
+            other => other.to_ascii_uppercase(),
+        })
+        .collect()
+}
+
+fn migrate_teacher_titles(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("SELECT teacher, title, updated_at FROM teacher_titles")
+        .map_err(|error| format!("No se pudo migrar catálogo de maestros: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("No se pudo leer títulos anteriores: {error}"))?;
+
+    for row in rows {
+        let (teacher, title, updated_at) =
+            row.map_err(|error| format!("No se pudo convertir título anterior: {error}"))?;
+        let teacher_key = normalize_teacher_key(&teacher);
+        if teacher_key.is_empty() {
+            continue;
+        }
+        connection
+            .execute(
+                "
+                INSERT OR IGNORE INTO teacher_directory
+                    (teacher_key, source_name, display_name, title, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ",
+                params![teacher_key, teacher, teacher, title, updated_at],
+            )
+            .map_err(|error| format!("No se pudo migrar maestro anterior: {error}"))?;
+    }
+
+    Ok(())
 }
 
 fn ensure_column(connection: &Connection, column_name: &str, statement: &str) -> Result<(), String> {
@@ -265,6 +385,16 @@ fn period_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExamPeriod> {
     })
 }
 
+fn teacher_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeacherRecord> {
+    Ok(TeacherRecord {
+        teacher_key: row.get(0)?,
+        source_name: row.get(1)?,
+        display_name: row.get(2)?,
+        title: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
 #[tauri::command]
 fn list_periods(db: State<'_, AppDb>) -> Result<Vec<ExamPeriod>, String> {
     let connection = db
@@ -299,6 +429,398 @@ fn list_periods(db: State<'_, AppDb>) -> Result<Vec<ExamPeriod>, String> {
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("No se pudo convertir el resultado: {error}"))
+}
+
+#[tauri::command]
+fn list_teacher_directory(db: State<'_, AppDb>) -> Result<Vec<TeacherRecord>, String> {
+    let connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT teacher_key, source_name, display_name, title, updated_at
+            FROM teacher_directory
+            ORDER BY display_name ASC
+            ",
+        )
+        .map_err(|error| format!("No se pudo preparar el directorio de maestros: {error}"))?;
+
+    let rows = statement
+        .query_map([], teacher_record_from_row)
+        .map_err(|error| format!("No se pudo leer el directorio de maestros: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudo convertir el directorio de maestros: {error}"))
+}
+
+#[tauri::command]
+fn sync_teacher_directory(
+    teachers: Vec<String>,
+    db: State<'_, AppDb>,
+) -> Result<Vec<TeacherRecord>, String> {
+    let now = now_millis()?.to_string();
+    let mut connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar sincronización de maestros: {error}"))?;
+
+    for teacher in teachers {
+        let source_name = teacher.split_whitespace().collect::<Vec<_>>().join(" ");
+        let teacher_key = normalize_teacher_key(&source_name);
+        if teacher_key.is_empty() {
+            continue;
+        }
+
+        transaction
+            .execute(
+                "
+                INSERT OR IGNORE INTO teacher_directory
+                    (teacher_key, source_name, display_name, title, updated_at)
+                VALUES (?1, ?2, ?3, '', ?4)
+                ",
+                params![teacher_key, source_name, source_name, now],
+            )
+            .map_err(|error| format!("No se pudo registrar maestro del PDF: {error}"))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo terminar sincronización de maestros: {error}"))?;
+    drop(connection);
+
+    list_teacher_directory(db)
+}
+
+#[tauri::command]
+fn save_teacher_directory(
+    records: Vec<TeacherRecord>,
+    db: State<'_, AppDb>,
+) -> Result<Vec<TeacherRecord>, String> {
+    let now = now_millis()?.to_string();
+    let mut connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar guardado del directorio: {error}"))?;
+    let mut submitted_keys = HashSet::new();
+
+    for record in records {
+        let source_name = record.source_name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let display_name = record
+            .display_name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let display_name = if display_name.is_empty() {
+            source_name.clone()
+        } else {
+            display_name
+        };
+        let teacher_key = if record.teacher_key.trim().is_empty() {
+            normalize_teacher_key(&source_name)
+        } else {
+            record.teacher_key.trim().to_string()
+        };
+        let title = record.title.trim();
+
+        if teacher_key.is_empty() || source_name.is_empty() {
+            continue;
+        }
+        submitted_keys.insert(teacher_key.clone());
+
+        transaction
+            .execute(
+                "
+                INSERT INTO teacher_directory
+                    (teacher_key, source_name, display_name, title, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(teacher_key) DO UPDATE SET
+                    source_name = excluded.source_name,
+                    display_name = excluded.display_name,
+                    title = excluded.title,
+                    updated_at = excluded.updated_at
+                ",
+                params![teacher_key, source_name, display_name, title, now],
+            )
+            .map_err(|error| format!("No se pudo guardar maestro: {error}"))?;
+
+        if title.is_empty() {
+            transaction
+                .execute("DELETE FROM teacher_titles WHERE teacher = ?1", params![source_name])
+                .map_err(|error| format!("No se pudo limpiar título anterior: {error}"))?;
+        } else {
+            transaction
+                .execute(
+                    "
+                    INSERT INTO teacher_titles (teacher, title, updated_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(teacher) DO UPDATE SET
+                        title = excluded.title,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![source_name, title, now],
+                )
+                .map_err(|error| format!("No se pudo actualizar título anterior: {error}"))?;
+        }
+    }
+
+    let existing_records = {
+        let mut statement = transaction
+            .prepare("SELECT teacher_key, source_name FROM teacher_directory")
+            .map_err(|error| format!("No se pudo revisar el directorio actual: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("No se pudo leer el directorio actual: {error}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudo convertir el directorio actual: {error}"))?
+    };
+
+    for (teacher_key, source_name) in existing_records {
+        if submitted_keys.contains(&teacher_key) {
+            continue;
+        }
+
+        transaction
+            .execute(
+                "DELETE FROM teacher_directory WHERE teacher_key = ?1",
+                params![teacher_key],
+            )
+            .map_err(|error| format!("No se pudo eliminar maestro del directorio: {error}"))?;
+        transaction
+            .execute("DELETE FROM teacher_titles WHERE teacher = ?1", params![source_name])
+            .map_err(|error| format!("No se pudo limpiar título del maestro eliminado: {error}"))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo terminar guardado del directorio: {error}"))?;
+    drop(connection);
+
+    list_teacher_directory(db)
+}
+
+#[tauri::command]
+fn list_teacher_titles(db: State<'_, AppDb>) -> Result<HashMap<String, String>, String> {
+    let connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT teacher, title
+            FROM teacher_titles
+            ORDER BY teacher ASC
+            ",
+        )
+        .map_err(|error| format!("No se pudo preparar la consulta de maestros: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("No se pudo leer el catálogo de maestros: {error}"))?;
+
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| format!("No se pudo convertir el catálogo de maestros: {error}"))
+}
+
+fn read_setting(connection: &Connection, key: &str) -> Result<String, String> {
+    match connection.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(value) => Ok(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        Err(error) => Err(format!("No se pudo leer la configuración: {error}")),
+    }
+}
+
+fn write_setting(connection: &Connection, key: &str, value: &str, now: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            ",
+            params![key, value, now],
+        )
+        .map_err(|error| format!("No se pudo guardar la configuración: {error}"))?;
+
+    Ok(())
+}
+
+fn app_config_assets_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("No se pudo resolver la carpeta de datos: {error}"))?;
+    let assets_dir = app_dir.join("config-assets");
+    fs::create_dir_all(&assets_dir)
+        .map_err(|error| format!("No se pudo crear carpeta de configuración: {error}"))?;
+    Ok(assets_dir)
+}
+
+fn image_extension(path: &Path) -> Result<&'static str, String> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpg"),
+        _ => Err("Firma y sello deben ser imágenes PNG o JPG.".to_string()),
+    }
+}
+
+fn remove_config_asset_variants(assets_dir: &Path, asset_name: &str) -> Result<(), String> {
+    for extension in ["png", "jpg"] {
+        let candidate = assets_dir.join(format!("{asset_name}.{extension}"));
+        if candidate.exists() {
+            fs::remove_file(&candidate)
+                .map_err(|error| format!("No se pudo reemplazar imagen anterior: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_config_image(
+    app: &AppHandle,
+    asset_name: &str,
+    source_path: &str,
+) -> Result<String, String> {
+    let source_path = source_path.trim();
+    let assets_dir = app_config_assets_dir(app)?;
+
+    if source_path.is_empty() {
+        remove_config_asset_variants(&assets_dir, asset_name)?;
+        return Ok(String::new());
+    }
+
+    let source = PathBuf::from(source_path);
+    if !source.exists() {
+        return Err(format!("No se encontró la imagen seleccionada: {source_path}"));
+    }
+
+    let extension = image_extension(&source)?;
+    let destination = assets_dir.join(format!("{asset_name}.{extension}"));
+    if source != destination {
+        remove_config_asset_variants(&assets_dir, asset_name)?;
+        fs::copy(&source, &destination)
+            .map_err(|error| format!("No se pudo copiar la imagen configurada: {error}"))?;
+    }
+
+    Ok(destination.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_general_config(db: State<'_, AppDb>) -> Result<GeneralConfig, String> {
+    let connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+
+    Ok(GeneralConfig {
+        coordinator_name: read_setting(&connection, "coordinator_name")?,
+        signature_path: read_setting(&connection, "signature_path")?,
+        seal_path: read_setting(&connection, "seal_path")?,
+    })
+}
+
+#[tauri::command]
+fn save_general_config(
+    app: AppHandle,
+    config: GeneralConfig,
+    db: State<'_, AppDb>,
+) -> Result<GeneralConfig, String> {
+    let now = now_millis()?.to_string();
+    let signature_path = persist_config_image(&app, "signature", &config.signature_path)?;
+    let seal_path = persist_config_image(&app, "seal", &config.seal_path)?;
+    let connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+
+    write_setting(
+        &connection,
+        "coordinator_name",
+        config.coordinator_name.trim(),
+        &now,
+    )?;
+    write_setting(&connection, "signature_path", &signature_path, &now)?;
+    write_setting(&connection, "seal_path", &seal_path, &now)?;
+
+    Ok(GeneralConfig {
+        coordinator_name: config.coordinator_name.trim().to_string(),
+        signature_path,
+        seal_path,
+    })
+}
+
+#[tauri::command]
+fn save_teacher_titles(
+    teacher_titles: HashMap<String, String>,
+    db: State<'_, AppDb>,
+) -> Result<HashMap<String, String>, String> {
+    let now = now_millis()?.to_string();
+    let mut connection = db
+        .connection
+        .lock()
+        .map_err(|_| "No se pudo bloquear la base de datos".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar guardado de maestros: {error}"))?;
+
+    for (teacher, title) in teacher_titles {
+        let teacher = teacher.trim();
+        let title = title.trim();
+        if teacher.is_empty() {
+            continue;
+        }
+
+        if title.is_empty() {
+            transaction
+                .execute("DELETE FROM teacher_titles WHERE teacher = ?1", params![teacher])
+                .map_err(|error| format!("No se pudo borrar el título del maestro: {error}"))?;
+            continue;
+        }
+
+        transaction
+            .execute(
+                "
+                INSERT INTO teacher_titles (teacher, title, updated_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(teacher) DO UPDATE SET
+                    title = excluded.title,
+                    updated_at = excluded.updated_at
+                ",
+                params![teacher, title, now],
+            )
+            .map_err(|error| format!("No se pudo guardar el título del maestro: {error}"))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo terminar guardado de maestros: {error}"))?;
+    drop(connection);
+
+    list_teacher_titles(db)
 }
 
 #[tauri::command]
@@ -421,6 +943,44 @@ fn format_time_token(token: &str) -> String {
     )
 }
 
+fn find_time_ranges(value: &str) -> Vec<String> {
+    value
+        .split(|char: char| char.is_whitespace() || char == ',')
+        .flat_map(|chunk| {
+            chunk
+                .as_bytes()
+                .windows(9)
+                .filter_map(|window| {
+                    let token = std::str::from_utf8(window).ok()?;
+                    if is_time_token(token) {
+                        Some(format_time_token(token))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn clean_subject_time_ranges(value: &str) -> String {
+    let mut cleaned = value.to_string();
+
+    while let Some(index) = cleaned
+        .as_bytes()
+        .windows(9)
+        .position(|window| {
+            std::str::from_utf8(window)
+                .map(is_time_token)
+                .unwrap_or(false)
+        })
+    {
+        cleaned.replace_range(index..index + 9, " ");
+    }
+
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn career_abbreviation(career: &str) -> String {
     if career.contains("INGENIERÍA EN SISTEMAS") {
         "LISI".to_string()
@@ -453,7 +1013,7 @@ fn parse_value_after_label(line: &str, label: &str) -> Option<String> {
     }
 }
 
-fn parse_period_group(line: &str) -> Option<(String, String)> {
+fn parse_period_group_plan(line: &str) -> Option<(String, String, String)> {
     if !line.contains("PERIODO:") || !line.contains("GRUPO:") {
         return None;
     }
@@ -467,8 +1027,13 @@ fn parse_period_group(line: &str) -> Option<(String, String)> {
         .windows(2)
         .find(|window| window[0] == "GRUPO:")
         .map(|window| window[1].to_string())?;
+    let plan = tokens
+        .windows(2)
+        .find(|window| window[0] == "PLAN:")
+        .map(|window| window[1].to_string())
+        .unwrap_or_default();
 
-    Some((period, group))
+    Some((period, group, plan))
 }
 
 fn parse_subject_line(line: &str) -> Option<(String, Vec<String>)> {
@@ -480,19 +1045,23 @@ fn parse_subject_line(line: &str) -> Option<(String, Vec<String>)> {
         return None;
     }
 
-    let first_time_index = tokens.iter().position(|token| is_time_token(token))?;
-    if first_time_index <= 1 {
+    let time_start = trimmed
+        .as_bytes()
+        .windows(9)
+        .position(|window| {
+            std::str::from_utf8(window)
+                .map(is_time_token)
+                .unwrap_or(false)
+        })?;
+    let code_end = trimmed.find(char::is_whitespace)?;
+    if time_start <= code_end {
         return None;
     }
 
-    let subject = tokens[1..first_time_index].join(" ");
-    let times = tokens[first_time_index..]
-        .iter()
-        .filter(|token| is_time_token(token))
-        .map(|token| format_time_token(token))
-        .collect::<Vec<_>>();
+    let subject = clean_subject_time_ranges(&trimmed[code_end..time_start]);
+    let times = find_time_ranges(&trimmed[time_start..]);
 
-    if times.is_empty() {
+    if subject.is_empty() || times.is_empty() {
         None
     } else {
         Some((subject, times))
@@ -522,6 +1091,7 @@ fn parse_schedule_text(pdf_path: &str, text: &str) -> ParsedSchedule {
     let mut career_code = String::new();
     let mut period = String::new();
     let mut group = String::new();
+    let mut plan = String::new();
     let mut courses = Vec::new();
     let mut index = 0;
 
@@ -535,9 +1105,10 @@ fn parse_schedule_text(pdf_path: &str, text: &str) -> ParsedSchedule {
             }
         }
 
-        if let Some((parsed_period, parsed_group)) = parse_period_group(line) {
+        if let Some((parsed_period, parsed_group, parsed_plan)) = parse_period_group_plan(line) {
             period = parsed_period;
             group = parsed_group;
+            plan = parsed_plan;
         }
 
         if let Some((subject, times)) = parse_subject_line(line) {
@@ -556,6 +1127,7 @@ fn parse_schedule_text(pdf_path: &str, text: &str) -> ParsedSchedule {
                 career_code: career_code.clone(),
                 period: period.clone(),
                 group: group.clone(),
+                plan: plan.clone(),
                 subject,
                 teacher,
                 monday: times.get(0).cloned(),
@@ -730,10 +1302,11 @@ fn run_first_available_command(
     let mut spawn_errors = Vec::new();
 
     for candidate in candidates {
-        let output = Command::new(&candidate.program)
-            .args(&candidate.args)
-            .args(args)
-            .output();
+        let mut command = Command::new(&candidate.program);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        let output = command.args(&candidate.args).args(args).output();
 
         match output {
             Ok(output) => return Ok(output),
@@ -808,6 +1381,65 @@ fn export_excel_blocking(
     Ok(())
 }
 
+#[tauri::command]
+async fn export_word(
+    app: AppHandle,
+    payload: ExportWordPayload,
+    output_dir: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || export_word_blocking(app, payload, output_dir))
+        .await
+        .map_err(|error| format!("No se pudo terminar la exportación Word: {error}"))?
+}
+
+fn export_word_blocking(
+    app: AppHandle,
+    payload: ExportWordPayload,
+    output_dir: String,
+) -> Result<(), String> {
+    if payload.sheets.is_empty() {
+        return Err("No hay hojas generadas para exportar a Word.".to_string());
+    }
+
+    let template_path = project_file_path(&app, "FormatoWordUAS.docx")?;
+    let script_path = project_file_path(&app, "scripts/export_word.py")?;
+
+    let temp_dir = env::temp_dir().join(format!("appmonroy-word-export-{}", now_millis()?));
+    fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("No se pudo crear carpeta temporal: {error}"))?;
+    let payload_path = temp_dir.join("payload.json");
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|error| format!("No se pudo preparar el contenido Word: {error}"))?;
+    fs::write(&payload_path, payload_bytes)
+        .map_err(|error| format!("No se pudo escribir el archivo temporal: {error}"))?;
+
+    let output = run_first_available_command(
+        python_candidates(),
+        &[
+            script_path.to_string_lossy().to_string(),
+            payload_path.to_string_lossy().to_string(),
+            template_path.to_string_lossy().to_string(),
+            output_dir.clone(),
+        ],
+        "Python",
+    )
+    .map_err(|error| {
+        format!(
+            "{error}\n\nPara exportar Word en Windows instala Python 3 o asegúrate de que el lanzador py esté disponible."
+        )
+    })?;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("No se pudo exportar Word: {stderr}{stdout}"));
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -822,10 +1454,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_periods,
+            get_general_config,
+            save_general_config,
+            list_teacher_directory,
+            sync_teacher_directory,
+            save_teacher_directory,
+            list_teacher_titles,
+            save_teacher_titles,
             save_period,
             delete_period,
             parse_schedule_pdf,
-            export_excel
+            export_excel,
+            export_word
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

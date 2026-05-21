@@ -25,6 +25,7 @@ const child = spawn(command, args, {
   env,
   shell: isWindows,
   stdio: "inherit",
+  windowsHide: true,
 });
 
 child.on("exit", (code, signal) => {
