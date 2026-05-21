@@ -26,11 +26,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": [
-      "../Plantilla.xlsx",
-      "scripts/export_excel.py",
-      "bin"
-    ],
+    "resources": {
+      "../Plantilla.xlsx": "Plantilla.xlsx",
+      "scripts/export_excel.py": "scripts/export_excel.py",
+      "bin": "bin"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

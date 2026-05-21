@@ -576,7 +576,16 @@ fn parse_schedule_text(pdf_path: &str, text: &str) -> ParsedSchedule {
 }
 
 #[tauri::command]
-fn parse_schedule_pdf(app: AppHandle, pdf_path: String) -> Result<ParsedSchedule, String> {
+async fn parse_schedule_pdf(app: AppHandle, pdf_path: String) -> Result<ParsedSchedule, String> {
+    tauri::async_runtime::spawn_blocking(move || parse_schedule_pdf_blocking(app, pdf_path))
+        .await
+        .map_err(|error| format!("No se pudo terminar el procesamiento del PDF: {error}"))?
+}
+
+fn parse_schedule_pdf_blocking(
+    app: AppHandle,
+    pdf_path: String,
+) -> Result<ParsedSchedule, String> {
     let candidates = pdftotext_candidates(&app);
     let output = run_first_available_command(
         candidates,
@@ -623,6 +632,7 @@ fn project_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String
         candidates.push(resource_dir.join(file_name));
         if let Some(file_basename) = PathBuf::from(file_name).file_name() {
             candidates.push(resource_dir.join(file_basename));
+            candidates.push(resource_dir.join("_up_").join(file_basename));
         }
     }
 

@@ -339,6 +339,7 @@ function App() {
   const [isPeriodsOpen, setIsPeriodsOpen] = useState(false);
   const [isStartDateOpen, setIsStartDateOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isParsingPdf, setIsParsingPdf] = useState(false);
   const [periodToDelete, setPeriodToDelete] = useState<SavedPeriod | null>(null);
   const [draggedRow, setDraggedRow] = useState<DraggedRow | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -593,12 +594,16 @@ function App() {
   }
 
   async function generateFromSelectedPdf() {
+    if (isParsingPdf) return;
+
     if (!selectedPdfPath) {
       await selectPdfFile();
       return;
     }
 
     try {
+      setIsParsingPdf(true);
+      setStatusMessage("Procesando PDF...");
       const parsedSchedule = await invoke<ParsedSchedule>("parse_schedule_pdf", {
         pdfPath: selectedPdfPath,
       });
@@ -613,6 +618,8 @@ function App() {
       );
     } catch (error) {
       setStatusMessage(`No se pudo procesar el PDF: ${String(error)}`);
+    } finally {
+      setIsParsingPdf(false);
     }
   }
 
@@ -1375,6 +1382,7 @@ function App() {
                 variant="outline"
                 size="icon"
                 aria-label="Cerrar modal"
+                disabled={isParsingPdf}
                 onClick={() => setIsStartDateOpen(false)}
               >
                 <X />
@@ -1426,12 +1434,37 @@ function App() {
 
             </div>
             <div className="flex justify-end gap-2 border-t border-border p-5">
-              <Button variant="outline" onClick={() => setIsStartDateOpen(false)}>
+              <Button
+                variant="outline"
+                disabled={isParsingPdf}
+                onClick={() => setIsStartDateOpen(false)}
+              >
                 Cancelar
               </Button>
-              <Button onClick={generateFromSelectedPdf}>
-                Generar calendario
+              <Button onClick={generateFromSelectedPdf} disabled={isParsingPdf}>
+                {isParsingPdf ? (
+                  <LoaderCircle className="animate-spin" />
+                ) : null}
+                {isParsingPdf ? "Procesando..." : "Generar calendario"}
               </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isParsingPdf ? (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-slate-950/35 p-5">
+          <div className="flex w-full max-w-sm items-center gap-4 rounded-lg border border-border bg-card p-5 shadow-2xl">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-[#fff8e5] text-primary">
+              <LoaderCircle className="size-5 animate-spin" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-foreground">
+                Procesando PDF
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                La app estÃ¡ leyendo el horario y preparando las hojas de examen.
+              </p>
             </div>
           </div>
         </div>
