@@ -1,6 +1,6 @@
 # AppMonroy Horarios
 
-App desktop para generar calendarios de examenes ordinarios desde PDF y exportarlos a Excel.
+App desktop para generar formatos requeridos desde PDF
 
 ## Desarrollo
 
