@@ -123,6 +123,17 @@ struct ExportWordPayload {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ImportedExcelSchedule {
+    period_name: String,
+    period_range: String,
+    school_year: String,
+    exam_start_date: String,
+    imported_row_count: i64,
+    sheets: Vec<ExportSheet>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ExportSheet {
     label: String,
     first_date: String,
@@ -1181,6 +1192,46 @@ fn parse_schedule_pdf_blocking(
 }
 
 #[tauri::command]
+async fn import_excel_calendar(
+    app: AppHandle,
+    excel_path: String,
+) -> Result<ImportedExcelSchedule, String> {
+    tauri::async_runtime::spawn_blocking(move || import_excel_calendar_blocking(app, excel_path))
+        .await
+        .map_err(|error| format!("No se pudo terminar la importación del Excel: {error}"))?
+}
+
+fn import_excel_calendar_blocking(
+    app: AppHandle,
+    excel_path: String,
+) -> Result<ImportedExcelSchedule, String> {
+    let script_path = project_file_path(&app, "scripts/import_excel.py")?;
+
+    let output = run_first_available_command(
+        python_candidates(),
+        &[
+            script_path.to_string_lossy().to_string(),
+            excel_path.clone(),
+        ],
+        "Python",
+    )
+    .map_err(|error| {
+        format!(
+            "{error}\n\nPara importar Excel en Windows instala Python 3 o asegúrate de que el lanzador py esté disponible."
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("No se pudo importar el Excel: {stderr}{stdout}"));
+    }
+
+    serde_json::from_slice::<ImportedExcelSchedule>(&output.stdout)
+        .map_err(|error| format!("No se pudo leer la información importada del Excel: {error}"))
+}
+
+#[tauri::command]
 fn delete_period(id: String, db: State<'_, AppDb>) -> Result<(), String> {
     let connection = db
         .connection
@@ -1385,9 +1436,9 @@ fn export_excel_blocking(
 async fn export_word(
     app: AppHandle,
     payload: ExportWordPayload,
-    output_dir: String,
+    output_path: String,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || export_word_blocking(app, payload, output_dir))
+    tauri::async_runtime::spawn_blocking(move || export_word_blocking(app, payload, output_path))
         .await
         .map_err(|error| format!("No se pudo terminar la exportación Word: {error}"))?
 }
@@ -1395,7 +1446,7 @@ async fn export_word(
 fn export_word_blocking(
     app: AppHandle,
     payload: ExportWordPayload,
-    output_dir: String,
+    output_path: String,
 ) -> Result<(), String> {
     if payload.sheets.is_empty() {
         return Err("No hay hojas generadas para exportar a Word.".to_string());
@@ -1419,7 +1470,7 @@ fn export_word_blocking(
             script_path.to_string_lossy().to_string(),
             payload_path.to_string_lossy().to_string(),
             template_path.to_string_lossy().to_string(),
-            output_dir.clone(),
+            output_path.clone(),
         ],
         "Python",
     )
@@ -1464,6 +1515,7 @@ pub fn run() {
             save_period,
             delete_period,
             parse_schedule_pdf,
+            import_excel_calendar,
             export_excel,
             export_word
         ])

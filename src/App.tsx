@@ -61,6 +61,15 @@ type SavedPeriod = {
   updatedAt?: string;
 };
 
+type ImportedExcelSchedule = {
+  periodName: string;
+  periodRange: string;
+  schoolYear: string;
+  examStartDate: string;
+  importedRowCount: number;
+  sheets: SheetPlan[];
+};
+
 type GeneralConfig = {
   coordinatorName: string;
   signaturePath: string;
@@ -248,6 +257,37 @@ function getTodayDateInput() {
 
 function getCurrentOfficeYear() {
   return String(new Date().getFullYear()).slice(-2);
+}
+
+function getOfficeYearFromDate(value: string) {
+  const match = value.match(/^(\d{4})-/);
+  return match ? match[1].slice(-2) : getCurrentOfficeYear();
+}
+
+function safeFileName(value: string) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function getWordTeacherCount(sheets: SheetPlan[]) {
+  const teachers = new Set<string>();
+  sheets.forEach((sheet) => {
+    sheet.blocks.forEach((block) => {
+      block.rows.forEach((row) => {
+        if (row.teacher.trim() && row.subject.trim()) {
+          teachers.add(row.teacher.trim());
+        }
+      });
+    });
+  });
+  return teachers.size;
+}
+
+function buildWordDefaultFileName(officeYear: string, startFolio: number, sheets: SheetPlan[]) {
+  const teacherCount = getWordTeacherCount(sheets);
+  const endFolio = teacherCount > 0 ? startFolio + teacherCount - 1 : startFolio;
+  return safeFileName(
+    `Oficios Word UAS-FIMAZ-CE-${officeYear}-${startFolio}-${endFolio}.docx`,
+  );
 }
 
 function capitalize(value: string) {
@@ -679,6 +719,7 @@ function App() {
   const [isGeneralConfigOpen, setIsGeneralConfigOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingWord, setIsExportingWord] = useState(false);
+  const [isImportingExcel, setIsImportingExcel] = useState(false);
   const [isParsingPdf, setIsParsingPdf] = useState(false);
   const [periodToDelete, setPeriodToDelete] = useState<SavedPeriod | null>(null);
   const [wordOfficeYear, setWordOfficeYear] = useState(() => getCurrentOfficeYear());
@@ -1051,6 +1092,60 @@ function App() {
     setIsWordModalOpen(true);
   }
 
+  async function importExcelForWord() {
+    if (isImportingExcel || isExportingWord) return;
+
+    const excelPath = await open({
+      multiple: false,
+      title: "Selecciona el Excel para generar Word",
+      filters: [
+        {
+          name: "Excel",
+          extensions: ["xlsx"],
+        },
+      ],
+    });
+
+    if (typeof excelPath !== "string") return;
+
+    try {
+      setIsImportingExcel(true);
+      setStatusMessage("Leyendo Excel para generar Word...");
+      const imported = await invoke<ImportedExcelSchedule>("import_excel_calendar", {
+        excelPath,
+      });
+      const importedWordPeriod = imported.periodRange
+        ? `${imported.periodName}: ${imported.periodRange}`
+        : imported.periodName;
+
+      setActivePeriod(null);
+      setPeriodName(imported.periodName);
+      setPeriodRange(imported.periodRange);
+      setSchoolYear(imported.schoolYear);
+      setExamStartDate(imported.examStartDate);
+      setSelectedPdfPath(null);
+      setGeneratedSheets(imported.sheets);
+      setSelectedSheet(imported.sheets[0]?.label ?? "");
+      setParsedCourseCount(imported.importedRowCount);
+      setCalendarSearchQuery("");
+      setCalendarSearchSelection(null);
+      setWordPeriod(importedWordPeriod);
+      setWordSchoolYear(`Ciclo Escolar ${imported.schoolYear}`);
+      setWordExamStartDate(imported.examStartDate);
+      setWordOfficeYear(getOfficeYearFromDate(imported.examStartDate));
+      setWordHourStart("09:00");
+      setWordHourEnd("17:00");
+      setIsWordModalOpen(true);
+      setStatusMessage(
+        `Excel importado: ${imported.sheets.length} pestañas y ${imported.importedRowCount} materias.`,
+      );
+    } catch (error) {
+      setStatusMessage(`No se pudo importar el Excel: ${String(error)}`);
+    } finally {
+      setIsImportingExcel(false);
+    }
+  }
+
   async function exportCurrentWord() {
     if (isExportingWord) return;
 
@@ -1065,13 +1160,18 @@ function App() {
       return;
     }
 
-    const outputDir = await open({
-      directory: true,
-      multiple: false,
-      title: "Selecciona la carpeta para guardar los documentos Word",
+    const outputPath = await saveFile({
+      defaultPath: buildWordDefaultFileName(wordOfficeYear, folio, generatedSheets),
+      title: "Guardar documento Word",
+      filters: [
+        {
+          name: "Word",
+          extensions: ["docx"],
+        },
+      ],
     });
 
-    if (typeof outputDir !== "string") return;
+    if (!outputPath) return;
 
     try {
       setIsExportingWord(true);
@@ -1092,7 +1192,7 @@ function App() {
           teacherTitles: {},
           sheets: generatedSheets,
         },
-        outputDir,
+        outputPath,
       });
       setIsWordModalOpen(false);
       setStatusMessage("Documentos Word generados correctamente");
@@ -1491,6 +1591,12 @@ function App() {
     ? draggedPreviewBlock?.rows[draggedRow.rowIndex] ?? null
     : null;
   const hasGeneratedCalendar = generatedSheets.length > 0;
+  // Mantener en false: la importación de Excel a Word queda lista para reactivarse si se necesita.
+  const showExcelWordImport = false;
+  const generatedBlockCount = generatedSheets.reduce(
+    (total, sheet) => total + sheet.blocks.length,
+    0,
+  );
   const calendarSearchSuggestions = getCalendarSearchSuggestions(
     generatedSheets,
     calendarSearchQuery,
@@ -1574,7 +1680,7 @@ function App() {
               <Card>
                 <CardHeader className="pb-2">
                   <CardDescription>Tablas por hoja</CardDescription>
-                  <CardTitle className="text-2xl">{generatedSheets.length ? 4 : 0}</CardTitle>
+                  <CardTitle className="text-2xl">{generatedBlockCount}</CardTitle>
                 </CardHeader>
               </Card>
               <Card>
@@ -1977,8 +2083,39 @@ function App() {
                     )}
                     {isExportingWord ? "Generando..." : "Generar Formato Word"}
                   </Button>
+                  {showExcelWordImport ? (
+                    <Button
+                      variant="outline"
+                      className="w-full justify-start"
+                      onClick={importExcelForWord}
+                      disabled={isImportingExcel || isExportingWord}
+                    >
+                      {isImportingExcel ? (
+                        <LoaderCircle className="animate-spin" />
+                      ) : (
+                        <Upload />
+                      )}
+                      {isImportingExcel ? "Leyendo Excel..." : "Word desde Excel"}
+                    </Button>
+                  ) : null}
                 </CardContent>
               </Card>
+            ) : null}
+
+            {!hasGeneratedCalendar && showExcelWordImport ? (
+              <Button
+                variant="outline"
+                className="h-11 justify-start"
+                onClick={importExcelForWord}
+                disabled={isImportingExcel || isExportingWord}
+              >
+                {isImportingExcel ? (
+                  <LoaderCircle className="animate-spin" />
+                ) : (
+                  <Upload />
+                )}
+                {isImportingExcel ? "Leyendo Excel..." : "Generar Word desde Excel"}
+              </Button>
             ) : null}
 
             <Button
@@ -2721,7 +2858,7 @@ function App() {
                 </section>
 
                 <section className="rounded-lg border border-border bg-muted/45 p-4 text-sm text-muted-foreground">
-                  Los títulos y nombres de maestros se toman del directorio de maestros.
+                  Los nombres de maestros y materias se usarán como aparecen en el calendario cargado.
                 </section>
               </div>
             </ScrollArea>
@@ -2755,6 +2892,24 @@ function App() {
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 La app estÃ¡ leyendo el horario y preparando las hojas de examen.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isImportingExcel ? (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-slate-950/35 p-5">
+          <div className="flex w-full max-w-sm items-center gap-4 rounded-lg border border-border bg-card p-5 shadow-2xl">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/70 bg-accent/20 text-primary">
+              <LoaderCircle className="size-5 animate-spin" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-foreground">
+                Leyendo Excel
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                La app está reconstruyendo las pestañas para generar el Word.
               </p>
             </div>
           </div>

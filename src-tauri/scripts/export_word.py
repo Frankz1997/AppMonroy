@@ -36,11 +36,12 @@ CONTENT = f"{{{NS['content']}}}"
 TABLE_MARKERS = ("{{CARRERA}}", "{{MATERIA}}", "{{FECHA_APLICACION}}")
 COORDINATOR_MARKER = "{{NOMBRE_COORDINADOR}}"
 IMAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+EMU_PER_PIXEL = 9525
 ASSET_LAYOUT = {
     "seal": {
         "relationship_id": "rIdAppSeal",
         "drawing_name": "AppMonroySeal",
-        "position_h": 2640000,
+        "position_h": 2640000 + (10 * EMU_PER_PIXEL),
         "position_v": -852000,
         "extent_cx": 1645920,
         "extent_cy": 1496060,
@@ -131,7 +132,16 @@ def office_year(value):
     return digits[-2:] if len(digits) >= 2 else digits.zfill(2)
 
 
-def career_from_row(row, sheet):
+def career_code_from_text(value):
+    text = clean_text(value).upper()
+    if "LISI" in text or "SISTEMAS DE INFORMACIÓN" in text or "SISTEMAS DE INFORMACION" in text:
+        return "LISI"
+    if re.search(r"\bLI\b", text) or "INFORMÁTICA" in text or "INFORMATICA" in text:
+        return "LI"
+    return clean_text(value)
+
+
+def career_from_row(row, sheet, block=None):
     group = clean_text(row.get("group", ""))
     group_match = re.match(r"([A-Z]{2,})\b", group)
     if group_match:
@@ -140,6 +150,11 @@ def career_from_row(row, sheet):
     label_match = re.search(r"\b(LISI|LI)\b$", clean_text(sheet.get("label", "")))
     if label_match:
         return label_match.group(1)
+
+    if block:
+        career = career_code_from_text(block.get("career", ""))
+        if career:
+            return career
 
     return clean_text(sheet.get("career", "")) or "LI"
 
@@ -304,7 +319,13 @@ def insert_configured_images(root, image_rels):
                 anchor_paragraph = previous
                 break
 
-    insert_at = 0
+    paragraph_children = list(anchor_paragraph)
+    paragraph_properties = anchor_paragraph.find(f"{W}pPr")
+    insert_at = (
+        paragraph_children.index(paragraph_properties) + 1
+        if paragraph_properties is not None
+        else 0
+    )
     for asset_name in ("seal", "signature"):
         image_rel = image_rels.get(asset_name)
         if not image_rel:
@@ -446,9 +467,11 @@ def transform_xml(source, replacements):
 def collect_teacher_entries(sheets):
     grouped = {}
     seen = set()
+    appearance_order = 0
 
     for sheet in sheets:
         for block in sheet.get("blocks", []) or []:
+            sort_date = clean_text(block.get("date", ""))
             application_date = format_table_date_es(block.get("date", ""))
             for row in block.get("rows", []) or []:
                 teacher = clean_text(row.get("teacher", ""))
@@ -457,10 +480,13 @@ def collect_teacher_entries(sheets):
                     continue
 
                 entry = {
-                    "career": career_from_row(row, sheet),
+                    "career": career_from_row(row, sheet, block),
                     "subject": subject,
                     "applicationDate": application_date,
+                    "sortDate": sort_date,
+                    "appearanceOrder": appearance_order,
                 }
+                appearance_order += 1
                 key = (teacher, entry["career"], entry["subject"], entry["applicationDate"])
                 if key in seen:
                     continue
@@ -472,9 +498,9 @@ def collect_teacher_entries(sheets):
         teacher: sorted(
             entries,
             key=lambda entry: (
-                entry.get("applicationDate", ""),
+                entry.get("sortDate", ""),
                 entry.get("career", ""),
-                entry.get("subject", ""),
+                entry.get("appearanceOrder", 0),
             ),
         )
         for teacher, entries in sorted(grouped.items())
@@ -561,10 +587,23 @@ def write_teachers_docx(template_path, output_path, page_payloads, image_rels):
             )
 
 
-def export_word(payload_path, template_path, output_dir):
+def resolve_output_path(output_target, default_file_name):
+    output_path = Path(output_target)
+    if output_path.suffix.lower() == ".docx":
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return output_path
+
+    if output_path.suffix:
+        output_path = output_path.with_suffix(".docx")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return output_path
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    return output_path / default_file_name
+
+
+def export_word(payload_path, template_path, output_target):
     payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     teacher_entries = collect_teacher_entries(payload.get("sheets", []))
     if not teacher_entries:
@@ -601,7 +640,7 @@ def export_word(payload_path, template_path, output_dir):
     file_name = safe_filename(
         f"Oficios Word UAS-FIMAZ-CE-{year}-{start_folio}-{end_folio}.docx"
     )
-    output_path = output_dir / file_name
+    output_path = resolve_output_path(output_target, file_name)
     write_teachers_docx(template_path, output_path, page_payloads, image_rels)
 
     return [str(output_path)]
@@ -609,7 +648,7 @@ def export_word(payload_path, template_path, output_dir):
 
 def main():
     if len(sys.argv) != 4:
-        print("Uso: export_word.py payload.json template.docx output_dir", file=sys.stderr)
+        print("Uso: export_word.py payload.json template.docx output_path", file=sys.stderr)
         raise SystemExit(2)
 
     export_word(sys.argv[1], sys.argv[2], sys.argv[3])
