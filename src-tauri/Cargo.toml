@@ -1,6 +1,6 @@
 [package]
 name = "appmonroy-horarios"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop app para generar calendarios de examenes desde horarios PDF"
 authors = ["Frankz"]
 edition = "2021"
