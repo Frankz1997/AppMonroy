@@ -11,22 +11,63 @@ from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 NS = {
+    "wpc": "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
+    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+    "o": "urn:schemas-microsoft-com:office:office",
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+    "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "v": "urn:schemas-microsoft-com:vml",
+    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "wpi": "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+    "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
+    "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+    "w10": "urn:schemas-microsoft-com:office:word",
+    "wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+    "w16cex": "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+    "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+    "w16": "http://schemas.microsoft.com/office/word/2018/wordml",
+    "w16sdtdh": "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+    "w16se": "http://schemas.microsoft.com/office/word/2015/wordml/symex",
     "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
     "office_rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "content": "http://schemas.openxmlformats.org/package/2006/content-types",
 }
 
-ET.register_namespace("w", NS["w"])
-ET.register_namespace("wp", NS["wp"])
-ET.register_namespace("a", NS["a"])
-ET.register_namespace("pic", NS["pic"])
-ET.register_namespace("r", NS["office_rel"])
+for prefix in (
+    "wpc",
+    "mc",
+    "o",
+    "w",
+    "wp",
+    "a",
+    "pic",
+    "m",
+    "v",
+    "wpg",
+    "wpi",
+    "wne",
+    "wps",
+    "w10",
+    "wp14",
+    "w14",
+    "w15",
+    "w16cex",
+    "w16cid",
+    "w16",
+    "w16sdtdh",
+    "w16se",
+    "r",
+):
+    ET.register_namespace(prefix, NS["office_rel"] if prefix == "r" else NS[prefix])
 
 W = f"{{{NS['w']}}}"
+MC = f"{{{NS['mc']}}}"
+W14 = f"{{{NS['w14']}}}"
 WP = f"{{{NS['wp']}}}"
 A = f"{{{NS['a']}}}"
 PIC = f"{{{NS['pic']}}}"
@@ -37,6 +78,7 @@ TABLE_MARKERS = ("{{CARRERA}}", "{{MATERIA}}", "{{FECHA_APLICACION}}")
 COORDINATOR_MARKER = "{{NOMBRE_COORDINADOR}}"
 IMAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
 EMU_PER_PIXEL = 9525
+IGNORABLE_PREFIXES = ("w14", "w15", "w16se", "w16cid", "w16", "w16cex", "w16sdtdh", "wp14")
 ASSET_LAYOUT = {
     "seal": {
         "relationship_id": "rIdAppSeal",
@@ -385,6 +427,7 @@ def transform_document_xml(source, replacements, entries):
     root = ET.fromstring(source)
     fill_table_rows(root, entries)
     replace_text_nodes(root, replacements)
+    prepare_word_xml(root)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -397,6 +440,75 @@ def page_break_paragraph():
 
 def local_name(name):
     return name.rsplit("}", 1)[-1]
+
+
+def namespace_uri(name):
+    if name.startswith("{") and "}" in name:
+        return name[1:].split("}", 1)[0]
+    return ""
+
+
+def used_namespace_uris(root):
+    uris = set()
+    for element in root.iter():
+        tag_uri = namespace_uri(element.tag)
+        if tag_uri:
+            uris.add(tag_uri)
+
+        for attribute_name in element.attrib:
+            attribute_uri = namespace_uri(attribute_name)
+            if attribute_uri:
+                uris.add(attribute_uri)
+
+    return uris
+
+
+def normalize_markup_compatibility(root):
+    ignorable_attribute = f"{MC}Ignorable"
+    if ignorable_attribute not in root.attrib:
+        return
+
+    used_uris = used_namespace_uris(root)
+    ignorable_prefixes = [
+        prefix for prefix in IGNORABLE_PREFIXES if NS[prefix] in used_uris
+    ]
+
+    if ignorable_prefixes:
+        root.set(ignorable_attribute, " ".join(ignorable_prefixes))
+    else:
+        del root.attrib[ignorable_attribute]
+
+
+def next_paragraph_id(used_ids, start):
+    candidate_number = start
+    while True:
+        candidate = f"{candidate_number & 0xFFFFFFFF:08X}"
+        candidate_number += 1
+        if candidate not in used_ids:
+            return candidate, candidate_number
+
+
+def uniquify_paragraph_ids(root):
+    paragraph_id_attribute = f"{W14}paraId"
+    used_ids = set()
+    next_id = 0x10000000
+
+    for paragraph in root.iter(f"{W}p"):
+        paragraph_id = paragraph.attrib.get(paragraph_id_attribute)
+        if not paragraph_id:
+            continue
+
+        normalized_id = paragraph_id.upper()
+        if normalized_id in used_ids:
+            normalized_id, next_id = next_paragraph_id(used_ids, next_id)
+
+        paragraph.set(paragraph_id_attribute, normalized_id)
+        used_ids.add(normalized_id)
+
+
+def prepare_word_xml(root):
+    uniquify_paragraph_ids(root)
+    normalize_markup_compatibility(root)
 
 
 def uniquify_drawing_ids(root):
@@ -455,12 +567,14 @@ def transform_document_xml_pages(source, page_payloads, image_rels):
         body.append(section_properties)
 
     uniquify_drawing_ids(root)
+    prepare_word_xml(root)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def transform_xml(source, replacements):
     root = ET.fromstring(source)
     replace_text_nodes(root, replacements)
+    prepare_word_xml(root)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

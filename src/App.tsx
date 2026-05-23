@@ -1792,6 +1792,12 @@ function App() {
           </div>
           <div className="flex flex-wrap items-center gap-3 lg:justify-end">
             <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" onClick={startOverSession}>
+                <Plus />
+                Empezar de nuevo
+              </Button>
+            </div>
+            <div className="flex items-center gap-2 border-l border-border pl-3">
               <Button
                 variant="outline"
                 role="switch"
@@ -1824,12 +1830,6 @@ function App() {
               >
                 <Settings />
               </Button>
-              <Button variant="outline" onClick={startOverSession}>
-                <Plus />
-                Empezar de nuevo
-              </Button>
-            </div>
-            <div className="flex items-center border-l border-border pl-3">
               <Button
                 variant="outline"
                 size="icon"
