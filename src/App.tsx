@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowDown,
   ArrowUp,
@@ -12,6 +13,7 @@ import {
   FileSpreadsheet,
   GripVertical,
   History,
+  Info,
   LoaderCircle,
   Moon,
   Plus,
@@ -148,6 +150,21 @@ type DragPreview = {
 
 type CalendarSearchKind = "teacher" | "subject";
 
+const PERIOD_CONFIG = {
+  "Periodo 1": {
+    range: "Agosto - Diciembre",
+    startMonth: 8,
+    startDay: 1,
+  },
+  "Periodo 2": {
+    range: "Enero - Junio",
+    startMonth: 1,
+    startDay: 1,
+  },
+} as const;
+
+type PeriodOption = keyof typeof PERIOD_CONFIG;
+
 type CalendarSearchSelection = {
   kind: CalendarSearchKind;
   value: string;
@@ -253,6 +270,50 @@ function toDateInputValue(date: Date) {
 
 function getTodayDateInput() {
   return toDateInputValue(new Date());
+}
+
+function isPeriodOption(value: string): value is PeriodOption {
+  return value === "Periodo 1" || value === "Periodo 2";
+}
+
+function buildSchoolYear(startYear: number) {
+  return `${startYear}-${startYear + 1}`;
+}
+
+function schoolYearStartYear(value: string) {
+  const years = value.match(/(?:19|20)\d{2}/g);
+  if (!years?.length) return new Date().getFullYear();
+  return Number.parseInt(years[0], 10);
+}
+
+function getPeriodYear(period: PeriodOption, schoolYearValue: string) {
+  const startYear = schoolYearStartYear(schoolYearValue);
+  return period === "Periodo 1" ? startYear : startYear + 1;
+}
+
+function getPeriodStartDate(period: PeriodOption, schoolYearValue: string) {
+  const config = PERIOD_CONFIG[period];
+  const year = getPeriodYear(period, schoolYearValue);
+  return `${year}-${String(config.startMonth).padStart(2, "0")}-${String(
+    config.startDay,
+  ).padStart(2, "0")}`;
+}
+
+function getSmartPeriodDefaults(referenceDate = new Date()) {
+  const year = referenceDate.getFullYear();
+  const month = referenceDate.getMonth() + 1;
+  const period: PeriodOption = month >= 8 ? "Periodo 1" : month <= 6 ? "Periodo 2" : "Periodo 1";
+  const schoolYearValue =
+    period === "Periodo 1" ? buildSchoolYear(year) : buildSchoolYear(year - 1);
+  const examDate =
+    month === 7 ? getPeriodStartDate(period, schoolYearValue) : toDateInputValue(referenceDate);
+
+  return {
+    periodName: period,
+    periodRange: PERIOD_CONFIG[period].range,
+    schoolYear: schoolYearValue,
+    examStartDate: examDate,
+  };
 }
 
 function getCurrentOfficeYear() {
@@ -487,6 +548,22 @@ function getTeacherDirectoryMap(records: TeacherRecord[]) {
   return new Map(records.map((record) => [record.teacherKey, record]));
 }
 
+function teacherHasTitle(record: TeacherRecord) {
+  return record.title.trim().length > 0;
+}
+
+function sortTeacherDirectory(records: TeacherRecord[]) {
+  return [...records].sort((left, right) => {
+    const leftHasTitle = teacherHasTitle(left);
+    const rightHasTitle = teacherHasTitle(right);
+    if (leftHasTitle !== rightHasTitle) {
+      return leftHasTitle ? 1 : -1;
+    }
+
+    return left.displayName.localeCompare(right.displayName, "es");
+  });
+}
+
 function formatTeacherNameWithDirectory(fallbackName: string, record?: TeacherRecord) {
   const displayName = record?.displayName.trim() || fallbackName.trim();
   const title = normalizeTeacherTitle(record?.title ?? "");
@@ -702,21 +779,23 @@ function getCalendarSearchSuggestions(sheets: SheetPlan[], query: string) {
 }
 
 function App() {
+  const smartDefaults = getSmartPeriodDefaults();
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialThemeMode());
   const [periods, setPeriods] = useState<SavedPeriod[]>([]);
   const [activePeriod, setActivePeriod] = useState<SavedPeriod | null>(null);
-  const [periodName, setPeriodName] = useState("Periodo 2");
-  const [periodRange, setPeriodRange] = useState("Enero - Junio");
-  const [schoolYear, setSchoolYear] = useState("2025-2026");
+  const [periodName, setPeriodName] = useState<string>(smartDefaults.periodName);
+  const [periodRange, setPeriodRange] = useState<string>(smartDefaults.periodRange);
+  const [schoolYear, setSchoolYear] = useState<string>(smartDefaults.schoolYear);
   const [generatedSheets, setGeneratedSheets] = useState<SheetPlan[]>([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [selectedPdfPath, setSelectedPdfPath] = useState<string | null>(null);
-  const [examStartDate, setExamStartDate] = useState(() => getTodayDateInput());
+  const [examStartDate, setExamStartDate] = useState(smartDefaults.examStartDate);
   const [parsedCourseCount, setParsedCourseCount] = useState(0);
   const [isPeriodsOpen, setIsPeriodsOpen] = useState(false);
   const [isStartDateOpen, setIsStartDateOpen] = useState(false);
   const [isWordModalOpen, setIsWordModalOpen] = useState(false);
   const [isGeneralConfigOpen, setIsGeneralConfigOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingWord, setIsExportingWord] = useState(false);
   const [isImportingExcel, setIsImportingExcel] = useState(false);
@@ -742,6 +821,7 @@ function App() {
   });
   const [teacherDirectory, setTeacherDirectory] = useState<TeacherRecord[]>([]);
   const [teacherDirectoryDraft, setTeacherDirectoryDraft] = useState<TeacherRecord[]>([]);
+  const [newTeacherKeys, setNewTeacherKeys] = useState<string[]>([]);
   const [isTeacherDirectoryOpen, setIsTeacherDirectoryOpen] = useState(false);
   const [calendarSearchQuery, setCalendarSearchQuery] = useState("");
   const [isCalendarSearchOpen, setIsCalendarSearchOpen] = useState(false);
@@ -774,9 +854,59 @@ function App() {
   }, []);
 
   useEffect(() => {
+    function preventContextMenu(event: MouseEvent) {
+      event.preventDefault();
+    }
+
+    window.addEventListener("contextmenu", preventContextMenu);
+    return () => window.removeEventListener("contextmenu", preventContextMenu);
+  }, []);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", themeMode === "dark");
     window.localStorage.setItem("appmonroy-theme", themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    const shouldLockBodyScroll =
+      isGeneralConfigOpen ||
+      isAboutOpen ||
+      isPeriodsOpen ||
+      isStartDateOpen ||
+      isWordModalOpen ||
+      isTeacherDirectoryOpen ||
+      Boolean(periodToDelete) ||
+      isParsingPdf ||
+      isImportingExcel ||
+      isExporting;
+
+    if (!shouldLockBodyScroll) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const previousPaddingRight = document.body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+
+    document.body.style.overflow = "hidden";
+    if (scrollbarWidth > 0) {
+      document.body.style.paddingRight = `${scrollbarWidth}px`;
+    }
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.body.style.paddingRight = previousPaddingRight;
+    };
+  }, [
+    isGeneralConfigOpen,
+    isAboutOpen,
+    isPeriodsOpen,
+    isStartDateOpen,
+    isWordModalOpen,
+    isTeacherDirectoryOpen,
+    periodToDelete,
+    isParsingPdf,
+    isImportingExcel,
+    isExporting,
+  ]);
 
   useEffect(() => {
     if (!draggedRow) return;
@@ -877,8 +1007,9 @@ function App() {
   async function loadTeacherDirectory() {
     try {
       const storedDirectory = await invoke<TeacherRecord[]>("list_teacher_directory");
-      setTeacherDirectory(storedDirectory);
-      setTeacherDirectoryDraft(storedDirectory);
+      const sortedDirectory = sortTeacherDirectory(storedDirectory);
+      setTeacherDirectory(sortedDirectory);
+      setTeacherDirectoryDraft(sortedDirectory);
     } catch (error) {
       setStatusMessage(`No se pudo cargar el directorio de maestros: ${String(error)}`);
     }
@@ -900,7 +1031,7 @@ function App() {
   }
 
   function openTeacherDirectory() {
-    setTeacherDirectoryDraft(teacherDirectory);
+    setTeacherDirectoryDraft(sortTeacherDirectory(teacherDirectory));
     setIsTeacherDirectoryOpen(true);
   }
 
@@ -918,12 +1049,14 @@ function App() {
           title: normalizeTeacherTitle(record.title),
         })),
       });
-      setTeacherDirectory(savedDirectory);
-      setTeacherDirectoryDraft(savedDirectory);
+      const sortedDirectory = sortTeacherDirectory(savedDirectory);
+      setTeacherDirectory(sortedDirectory);
+      setTeacherDirectoryDraft(sortedDirectory);
+      setNewTeacherKeys([]);
       setGeneratedSheets((currentSheets) =>
         applyTeacherDirectoryToSheets(
           clearDeletedTeachersFromSheets(currentSheets, deletedTeachers),
-          savedDirectory,
+          sortedDirectory,
         ),
       );
       setIsTeacherDirectoryOpen(false);
@@ -966,12 +1099,13 @@ function App() {
   }
 
   function resetWorkArea() {
+    const defaults = getSmartPeriodDefaults();
     setActivePeriod(null);
-    setPeriodName("Periodo 2");
-    setPeriodRange("Enero - Junio");
-    setSchoolYear("2025-2026");
+    setPeriodName(defaults.periodName);
+    setPeriodRange(defaults.periodRange);
+    setSchoolYear(defaults.schoolYear);
     setSelectedPdfPath(null);
-    setExamStartDate(getTodayDateInput());
+    setExamStartDate(defaults.examStartDate);
     setParsedCourseCount(0);
     setGeneratedSheets([]);
     setSelectedSheet("");
@@ -979,6 +1113,32 @@ function App() {
     setIsCalendarSearchOpen(false);
     setCalendarSearchSelection(null);
     setCalendarSearchSort({ key: "name", direction: "asc" });
+  }
+
+  function applySmartDefaultsForPdf() {
+    const defaults = getSmartPeriodDefaults();
+    setPeriodName(defaults.periodName);
+    setPeriodRange(defaults.periodRange);
+    setSchoolYear(defaults.schoolYear);
+    setExamStartDate(defaults.examStartDate);
+  }
+
+  function updatePeriodName(value: string) {
+    if (!isPeriodOption(value)) {
+      setPeriodName(value);
+      return;
+    }
+
+    setPeriodName(value);
+    setPeriodRange(PERIOD_CONFIG[value].range);
+    setExamStartDate(getPeriodStartDate(value, schoolYear));
+  }
+
+  function updateSchoolYear(value: string) {
+    setSchoolYear(value);
+    if (isPeriodOption(periodName)) {
+      setExamStartDate(getPeriodStartDate(periodName, value));
+    }
   }
 
   function applyActivePeriod(period: SavedPeriod) {
@@ -1084,9 +1244,10 @@ function App() {
       return;
     }
 
-    setWordPeriod(`${periodName} ${periodRange}`);
+    setWordPeriod(periodRange ? `${periodName}: ${periodRange}` : periodName);
     setWordSchoolYear(`Ciclo Escolar ${schoolYear}`);
     setWordExamStartDate(examStartDate);
+    setWordOfficeYear(getOfficeYearFromDate(examStartDate));
     setWordHourStart("09:00");
     setWordHourEnd("17:00");
     setIsWordModalOpen(true);
@@ -1209,6 +1370,7 @@ function App() {
     setIsStartDateOpen(false);
     setIsWordModalOpen(false);
     setIsTeacherDirectoryOpen(false);
+    setIsAboutOpen(false);
     setPeriodToDelete(null);
     setStatusMessage("Sesión reiniciada");
   }
@@ -1249,7 +1411,8 @@ function App() {
 
       if (typeof file === "string") {
         setSelectedPdfPath(file);
-        setExamStartDate(getTodayDateInput());
+        setActivePeriod(null);
+        applySmartDefaultsForPdf();
         setIsStartDateOpen(true);
         setStatusMessage("PDF seleccionado, falta confirmar la fecha inicial");
       }
@@ -1272,15 +1435,23 @@ function App() {
       const parsedSchedule = await invoke<ParsedSchedule>("parse_schedule_pdf", {
         pdfPath: selectedPdfPath,
       });
+      const previousTeacherKeys = new Set(
+        teacherDirectory.map((teacher) => teacher.teacherKey),
+      );
       const syncedDirectory = await invoke<TeacherRecord[]>("sync_teacher_directory", {
         teachers: parsedSchedule.courses.map((course) => course.teacher),
       });
-      setTeacherDirectory(syncedDirectory);
-      setTeacherDirectoryDraft(syncedDirectory);
+      const sortedDirectory = sortTeacherDirectory(syncedDirectory);
+      const detectedNewTeacherKeys = sortedDirectory
+        .filter((teacher) => !previousTeacherKeys.has(teacher.teacherKey))
+        .map((teacher) => teacher.teacherKey);
+      setTeacherDirectory(sortedDirectory);
+      setTeacherDirectoryDraft(sortedDirectory);
+      setNewTeacherKeys(detectedNewTeacherKeys);
 
       const titledSchedule = {
         ...parsedSchedule,
-        courses: applyTeacherDirectoryToCourses(parsedSchedule.courses, syncedDirectory),
+        courses: applyTeacherDirectoryToCourses(parsedSchedule.courses, sortedDirectory),
       };
       const sheets = buildSheetsFromSchedule(titledSchedule, examStartDate);
 
@@ -1289,7 +1460,9 @@ function App() {
       setParsedCourseCount(parsedSchedule.courses.length);
       setIsStartDateOpen(false);
       setStatusMessage(
-        `PDF procesado: ${parsedSchedule.courses.length} materias detectadas`,
+        detectedNewTeacherKeys.length
+          ? `PDF procesado: ${parsedSchedule.courses.length} materias detectadas. ${detectedNewTeacherKeys.length} maestro(s) nuevo(s) en el directorio.`
+          : `PDF procesado: ${parsedSchedule.courses.length} materias detectadas`,
       );
     } catch (error) {
       setStatusMessage(`No se pudo procesar el PDF: ${String(error)}`);
@@ -1593,6 +1766,7 @@ function App() {
   const hasGeneratedCalendar = generatedSheets.length > 0;
   // Mantener en false: la importación de Excel a Word queda lista para reactivarse si se necesita.
   const showExcelWordImport = false;
+  const newTeacherCount = newTeacherKeys.length;
   const generatedBlockCount = generatedSheets.reduce(
     (total, sheet) => total + sheet.blocks.length,
     0,
@@ -1616,43 +1790,55 @@ function App() {
               Generador de calendarios ordinarios
             </h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-            <Button
-              variant="outline"
-              role="switch"
-              aria-checked={themeMode === "dark"}
-              aria-label="Cambiar tema oscuro"
-              onClick={toggleThemeMode}
-              className="h-8 gap-2 px-2"
-            >
-              {themeMode === "dark" ? <Sun /> : <Moon />}
-              <span
-                aria-hidden="true"
-                className={`relative h-5 w-9 rounded-full border transition-colors ${
-                  themeMode === "dark"
-                    ? "border-primary bg-primary"
-                    : "border-input bg-muted"
-                }`}
+          <div className="flex flex-wrap items-center gap-3 lg:justify-end">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                role="switch"
+                aria-checked={themeMode === "dark"}
+                aria-label="Cambiar tema oscuro"
+                onClick={toggleThemeMode}
+                className="h-8 gap-2 px-2"
               >
+                {themeMode === "dark" ? <Sun /> : <Moon />}
                 <span
-                  className={`absolute top-1/2 size-3.5 -translate-y-1/2 rounded-full bg-card shadow-sm transition-[left] ${
-                    themeMode === "dark" ? "left-[18px]" : "left-[3px]"
+                  aria-hidden="true"
+                  className={`relative h-5 w-9 rounded-full border transition-colors ${
+                    themeMode === "dark"
+                      ? "border-primary bg-primary"
+                      : "border-input bg-muted"
                   }`}
-                />
-              </span>
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              aria-label="Config general"
-              onClick={openGeneralConfig}
-            >
-              <Settings />
-            </Button>
-            <Button variant="outline" onClick={startOverSession}>
-              <Plus />
-              Empezar de nuevo
-            </Button>
+                >
+                  <span
+                    className={`absolute top-1/2 size-3.5 -translate-y-1/2 rounded-full bg-card shadow-sm transition-[left] ${
+                      themeMode === "dark" ? "left-[18px]" : "left-[3px]"
+                    }`}
+                  />
+                </span>
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Config general"
+                onClick={openGeneralConfig}
+              >
+                <Settings />
+              </Button>
+              <Button variant="outline" onClick={startOverSession}>
+                <Plus />
+                Empezar de nuevo
+              </Button>
+            </div>
+            <div className="flex items-center border-l border-border pl-3">
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Acerca de"
+                onClick={() => setIsAboutOpen(true)}
+              >
+                <Info />
+              </Button>
+            </div>
           </div>
         </header>
 
@@ -2125,7 +2311,12 @@ function App() {
             >
               <Users />
               Directorio de maestros
-              <Badge variant="secondary" className="ml-auto">
+              {newTeacherCount > 0 ? (
+                <Badge className="ml-auto border-primary/25 bg-primary/10 text-primary hover:bg-primary/10">
+                  {newTeacherCount} nuevo(s)
+                </Badge>
+              ) : null}
+              <Badge variant="secondary" className={newTeacherCount > 0 ? "" : "ml-auto"}>
                 {teacherDirectory.length}
               </Badge>
             </Button>
@@ -2144,6 +2335,98 @@ function App() {
           </aside>
         </section>
       </div>
+
+      {isAboutOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-5"
+          onPointerDown={(event) =>
+            closeOnBackdropPointerDown(event, () => setIsAboutOpen(false))
+          }
+        >
+          <div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  Acerca de
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Información del proyecto y referencias para mantenimiento.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Cerrar acerca de"
+                onClick={() => setIsAboutOpen(false)}
+              >
+                <X />
+              </Button>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="space-y-5 p-5 text-sm">
+                <section className="space-y-2">
+                  <h3 className="font-semibold text-foreground">
+                    Generador de Formatos
+                  </h3>
+                  <p className="text-muted-foreground">
+                    Aplicación de escritorio para generar calendarios de exámenes
+                    ordinarios en Excel y oficios Word a partir de horarios PDF.
+                  </p>
+                </section>
+
+                <section className="grid gap-3 rounded-lg border border-border bg-muted/35 p-4">
+                  <div>
+                    <div className="text-xs font-medium uppercase text-muted-foreground">
+                      Realizado por
+                    </div>
+                    <div className="mt-1 font-medium text-foreground">
+                      Francisco Castro - LISI
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium uppercase text-muted-foreground">
+                      Repositorio
+                    </div>
+                    <div className="mt-1 break-words text-primary">
+                      github.com/Frankz1997/AppMonroy.git
+                    </div>
+                  </div>
+                </section>
+
+                <section className="space-y-3">
+                  <h3 className="font-semibold text-foreground">
+                    Para continuar el proyecto
+                  </h3>
+                  <div className="grid gap-2 text-muted-foreground">
+                    <p>Las plantillas principales están en la raíz del proyecto.</p>
+                    <p>Los exportadores se encuentran en src-tauri/scripts/.</p>
+                    <p>La información local se guarda en SQLite desde la app.</p>
+                    <p>La interfaz principal está concentrada en src/App.tsx.</p>
+                  </div>
+                </section>
+              </div>
+            </ScrollArea>
+
+            <div className="flex justify-end gap-2 border-t border-border p-5">
+              <Button variant="outline" onClick={() => setIsAboutOpen(false)}>
+                Cerrar
+              </Button>
+              <Button
+                onClick={async () => {
+                  try {
+                    await openUrl("https://github.com/Frankz1997/AppMonroy.git");
+                  } catch (error) {
+                    setStatusMessage(`No se pudo abrir el repositorio: ${String(error)}`);
+                  }
+                }}
+              >
+                Abrir repositorio
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isGeneralConfigOpen ? (
         <div
@@ -2314,7 +2597,17 @@ function App() {
                       {teacherDirectoryDraft.map((teacher, teacherIndex) => (
                         <TableRow key={teacher.teacherKey} className="hover:bg-accent/15">
                           <TableCell className="px-3 py-2 text-sm text-muted-foreground">
-                            {teacher.sourceName}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span>{teacher.sourceName}</span>
+                              {newTeacherKeys.includes(teacher.teacherKey) ? (
+                                <Badge className="border-primary/25 bg-primary/10 text-primary hover:bg-primary/10">
+                                  Nuevo
+                                </Badge>
+                              ) : null}
+                              {!teacherHasTitle(teacher) ? (
+                                <Badge variant="outline">Sin título</Badge>
+                              ) : null}
+                            </div>
                           </TableCell>
                           <TableCell className="px-3 py-2">
                             <Input
@@ -2691,7 +2984,7 @@ function App() {
                   <AppSelect
                     id="period-name"
                     value={periodName}
-                    onChange={setPeriodName}
+                    onChange={updatePeriodName}
                     options={[
                       { value: "Periodo 1", label: "Periodo 1" },
                       { value: "Periodo 2", label: "Periodo 2" },
@@ -2715,7 +3008,7 @@ function App() {
                   <Input
                     id="school-year"
                     value={schoolYear}
-                    onChange={(event) => setSchoolYear(event.currentTarget.value)}
+                    onChange={(event) => updateSchoolYear(event.currentTarget.value)}
                   />
                 </div>
                 <div className="space-y-2">
